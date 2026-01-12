@@ -1,3 +1,7 @@
+from collections import OrderedDict
+from typing import Any
+
+from django import forms
 from django.utils.translation import gettext_lazy as _
 
 from pretix.base.payment import BasePaymentProvider
@@ -30,13 +34,73 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         )
 
     @property
-    def settings_form_fields(self) -> dict:
+    def settings_form_fields(self) -> "OrderedDict[str, forms.Field]":
         """
         Return the form fields for the payment provider settings.
 
         These will be displayed in the event's payment settings.
         """
-        return {}
+        d: OrderedDict[str, Any] = OrderedDict(
+            list(super().settings_form_fields.items())
+            + [
+                (
+                    "space_id",
+                    forms.CharField(
+                        label=_("Space ID"),
+                        help_text=_(
+                            "Your PostFinance Checkout space ID. "
+                            "You can find this in your PostFinance Checkout account "
+                            "under Space > General Settings."
+                        ),
+                        required=True,
+                    ),
+                ),
+                (
+                    "user_id",
+                    forms.CharField(
+                        label=_("User ID"),
+                        help_text=_(
+                            "Your PostFinance Checkout application user ID. "
+                            "Create an application user in your PostFinance Checkout account "
+                            "under Account > Users > Application Users."
+                        ),
+                        required=True,
+                    ),
+                ),
+                (
+                    "api_secret",
+                    forms.CharField(
+                        label=_("API Secret"),
+                        help_text=_(
+                            "The API secret (authentication key) for your application user. "
+                            "This is shown only once when creating the application user."
+                        ),
+                        required=True,
+                        widget=forms.PasswordInput(
+                            render_value=True,
+                            attrs={"autocomplete": "new-password"},
+                        ),
+                    ),
+                ),
+                (
+                    "environment",
+                    forms.ChoiceField(
+                        label=_("Environment"),
+                        help_text=_(
+                            "Select 'Sandbox' for testing or 'Production' for live payments. "
+                            "Use sandbox credentials when testing."
+                        ),
+                        choices=[
+                            ("sandbox", _("Sandbox (Testing)")),
+                            ("production", _("Production (Live)")),
+                        ],
+                        initial="sandbox",
+                        required=True,
+                    ),
+                ),
+            ]
+        )
+        return d
 
     def payment_is_valid_session(self, request) -> bool:
         """
