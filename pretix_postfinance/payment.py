@@ -7,7 +7,12 @@ from django import forms
 from django.contrib import messages
 from django.http import HttpRequest
 from django.utils.translation import gettext_lazy as _
-from postfinancecheckout.models import LineItemCreate, LineItemType, TransactionState
+from postfinancecheckout.models import (
+    LineItemCreate,
+    LineItemType,
+    TransactionCompletionBehavior,
+    TransactionState,
+)
 from pretix.base.models import OrderPayment
 from pretix.base.payment import BasePaymentProvider
 from pretix.multidomain.urlreverse import build_absolute_uri
@@ -166,6 +171,24 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         required=False,
                     ),
                 ),
+                (
+                    "capture_mode",
+                    forms.ChoiceField(
+                        label=_("Capture Mode"),
+                        help_text=_(
+                            "Choose when to capture (complete) payments. "
+                            "'Immediate' captures automatically after authorization. "
+                            "'Manual' keeps payments in authorized state until you "
+                            "capture them manually."
+                        ),
+                        choices=[
+                            ("immediate", _("Immediate (Recommended)")),
+                            ("manual", _("Manual")),
+                        ],
+                        initial="immediate",
+                        required=True,
+                    ),
+                ),
             ]
         )
         return d
@@ -318,12 +341,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
             merchant_reference = f"pretix-{self.event.slug}"
 
+            # Determine completion behavior based on capture mode setting
+            capture_mode = self.settings.get("capture_mode", "immediate")
+            if capture_mode == "manual":
+                completion_behavior = TransactionCompletionBehavior.COMPLETE_DEFERRED
+            else:
+                completion_behavior = TransactionCompletionBehavior.COMPLETE_IMMEDIATELY
+
             transaction = client.create_transaction(
                 currency=currency,
                 line_items=line_items,
                 success_url=success_url,
                 failed_url=failed_url,
                 merchant_reference=merchant_reference,
+                completion_behavior=completion_behavior,
             )
 
             transaction_id = transaction.id

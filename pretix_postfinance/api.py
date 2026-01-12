@@ -15,6 +15,7 @@ from postfinancecheckout.models import (
     LineItemType,
     Space,
     Transaction,
+    TransactionCompletionBehavior,
     TransactionCreate,
 )
 from postfinancecheckout.postfinancecheckout_sdk_exception import (
@@ -126,6 +127,7 @@ class PostFinanceClient:
         failed_url: str,
         merchant_reference: Optional[str] = None,
         language: Optional[str] = None,
+        completion_behavior: Optional[TransactionCompletionBehavior] = None,
     ) -> Transaction:
         """
         Create a new payment transaction.
@@ -137,6 +139,9 @@ class PostFinanceClient:
             failed_url: URL to redirect to on failed/cancelled payment.
             merchant_reference: Optional merchant reference for this transaction.
             language: Optional language code for the payment page (e.g., 'en-US').
+            completion_behavior: Optional transaction completion behavior.
+                COMPLETE_IMMEDIATELY for immediate capture,
+                COMPLETE_DEFERRED for manual capture.
 
         Returns:
             The created Transaction object.
@@ -151,6 +156,7 @@ class PostFinanceClient:
             failedUrl=failed_url,
             merchantReference=merchant_reference,
             language=language,
+            completionBehavior=completion_behavior,
         )
 
         try:
