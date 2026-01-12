@@ -362,17 +362,31 @@ class PostFinanceWebhookView(View):
                 payload.get("entityId"),
             )
 
+        entity_id = payload.get("entityId")
+        listener_entity_id = payload.get("listenerEntityId")
+        state = payload.get("state")
+
         logger.info(
             "PostFinance webhook received: entityId=%s, listenerEntityId=%s, "
             "spaceId=%s, state=%s",
-            payload.get("entityId"),
-            payload.get("listenerEntityId"),
+            entity_id,
+            listener_entity_id,
             space_id,
-            payload.get("state"),
+            state,
         )
 
-        # Return 200 OK to acknowledge receipt
-        # Actual state processing will be implemented in US-012
+        # Process the transaction state update
+        result = self._process_transaction_state(
+            entity_id=entity_id,
+            space_id=space_id,
+            state=state,
+        )
+
+        if result is None:
+            # Could not find or process payment - return 200 to prevent retries
+            # (webhook is valid but payment may not exist yet or listener type unknown)
+            return HttpResponse(status=200)
+
         return HttpResponse(status=200)
 
     def _validate_signature(
@@ -473,6 +487,220 @@ class PostFinanceWebhookView(View):
                 continue
 
         return None
+
+    def _process_transaction_state(
+        self,
+        entity_id: Optional[int],
+        space_id: int,
+        state: Optional[str],
+    ) -> Optional[bool]:
+        """
+        Process transaction state update from webhook.
+
+        Finds the payment matching the PostFinance transaction ID, fetches
+        the current transaction state from PostFinance, and updates the
+        payment state accordingly. Operations are idempotent.
+
+        Args:
+            entity_id: The PostFinance transaction ID (entityId from webhook).
+            space_id: The PostFinance space ID.
+            state: The transaction state from the webhook (may be None).
+
+        Returns:
+            True if the payment was updated, False if already in final state,
+            None if payment not found or could not be processed.
+        """
+        if not entity_id:
+            logger.warning("PostFinance webhook: missing entityId")
+            return None
+
+        # Find payment by transaction ID
+        payment = self._find_payment_by_transaction_id(entity_id)
+        if not payment:
+            logger.warning(
+                "PostFinance webhook: no payment found for transaction %s",
+                entity_id,
+            )
+            return None
+
+        # Get client for this space
+        client = self._get_client_for_space(space_id)
+        if not client:
+            logger.error(
+                "PostFinance webhook: could not get client for spaceId=%s",
+                space_id,
+            )
+            return None
+
+        # Fetch full transaction details from PostFinance
+        try:
+            transaction = client.get_transaction(int(entity_id))
+        except PostFinanceError as e:
+            logger.error(
+                "PostFinance webhook: failed to fetch transaction %s: %s",
+                entity_id,
+                e,
+            )
+            return None
+
+        transaction_state = transaction.state
+        logger.info(
+            "PostFinance webhook: processing transaction %s state=%s for payment %s "
+            "(current pretix state=%s)",
+            entity_id,
+            transaction_state,
+            payment.pk,
+            payment.state,
+        )
+
+        # Update payment info with latest transaction data
+        payment_method = None
+        if transaction.payment_connector_configuration:
+            payment_method = transaction.payment_connector_configuration.name
+
+        payment.info_data = payment.info_data or {}
+        payment.info_data.update({
+            "transaction_id": entity_id,
+            "state": transaction_state.value if transaction_state else None,
+            "payment_method": payment_method,
+        })
+        payment.save(update_fields=["info"])
+
+        # Process state transition (idempotent)
+        return self._update_payment_state(payment, transaction_state)
+
+    def _find_payment_by_transaction_id(
+        self,
+        transaction_id: int,
+    ) -> Optional[OrderPayment]:
+        """
+        Find a payment record by PostFinance transaction ID.
+
+        Searches for payments that have the given transaction ID stored
+        in their info_data.
+
+        Args:
+            transaction_id: The PostFinance transaction ID.
+
+        Returns:
+            The OrderPayment if found, None otherwise.
+        """
+        # Search for payment with this transaction ID in info_data
+        # info_data is stored as JSON in the 'info' field
+        payments = OrderPayment.objects.filter(
+            provider="postfinance",
+            info__icontains=str(transaction_id),
+        )
+
+        for payment in payments:
+            info_data = payment.info_data or {}
+            if str(info_data.get("transaction_id")) == str(transaction_id):
+                return payment
+
+        return None
+
+    def _update_payment_state(
+        self,
+        payment: OrderPayment,
+        transaction_state: Optional[TransactionState],
+    ) -> bool:
+        """
+        Update payment state based on PostFinance transaction state.
+
+        This method is idempotent - calling it multiple times with the
+        same state will have the same result.
+
+        Args:
+            payment: The OrderPayment to update.
+            transaction_state: The PostFinance transaction state.
+
+        Returns:
+            True if a state transition occurred, False if already in final state.
+        """
+        if transaction_state is None:
+            logger.warning(
+                "PostFinance webhook: no transaction state for payment %s",
+                payment.pk,
+            )
+            return False
+
+        # Check if payment is already in a final state (idempotent check)
+        if payment.state in (
+            OrderPayment.PAYMENT_STATE_CONFIRMED,
+            OrderPayment.PAYMENT_STATE_REFUNDED,
+        ):
+            logger.info(
+                "PostFinance webhook: payment %s already confirmed/refunded, "
+                "skipping state update (transaction state: %s)",
+                payment.pk,
+                transaction_state,
+            )
+            return False
+
+        if payment.state in (
+            OrderPayment.PAYMENT_STATE_FAILED,
+            OrderPayment.PAYMENT_STATE_CANCELED,
+        ):
+            # For failed/canceled payments, only allow recovery to success states
+            if transaction_state not in SUCCESS_STATES:
+                logger.info(
+                    "PostFinance webhook: payment %s already failed/canceled, "
+                    "skipping non-success state update (transaction state: %s)",
+                    payment.pk,
+                    transaction_state,
+                )
+                return False
+
+        # Handle success states (AUTHORIZED, COMPLETED, FULFILL, CONFIRMED, PROCESSING)
+        if transaction_state in SUCCESS_STATES:
+            try:
+                payment.confirm()
+                logger.info(
+                    "PostFinance webhook: payment %s confirmed via webhook "
+                    "(transaction state: %s)",
+                    payment.pk,
+                    transaction_state,
+                )
+                return True
+            except Exception as e:
+                logger.exception(
+                    "PostFinance webhook: error confirming payment %s: %s",
+                    payment.pk,
+                    e,
+                )
+                return False
+
+        # Handle failure states (FAILED, DECLINE, VOIDED)
+        if transaction_state in FAILURE_STATES:
+            payment.fail(info={"state": transaction_state.value})
+            logger.info(
+                "PostFinance webhook: payment %s failed via webhook "
+                "(transaction state: %s)",
+                payment.pk,
+                transaction_state,
+            )
+            return True
+
+        # Handle pending/intermediate states (CREATE, PENDING)
+        if payment.state == OrderPayment.PAYMENT_STATE_CREATED:
+            payment.state = OrderPayment.PAYMENT_STATE_PENDING
+            payment.save(update_fields=["state"])
+            logger.info(
+                "PostFinance webhook: payment %s set to pending via webhook "
+                "(transaction state: %s)",
+                payment.pk,
+                transaction_state,
+            )
+            return True
+
+        logger.debug(
+            "PostFinance webhook: no state change for payment %s "
+            "(transaction state: %s, payment state: %s)",
+            payment.pk,
+            transaction_state,
+            payment.state,
+        )
+        return False
 
     def _parse_payload(self, request: HttpRequest) -> Dict[str, Any]:
         """
