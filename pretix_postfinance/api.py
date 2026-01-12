@@ -250,3 +250,17 @@ class PostFinanceClient:
             The JSON response as a dictionary.
         """
         return self._request("POST", path, params=params, data=data, timeout=timeout)
+
+    def get_space(self) -> Dict[str, Any]:
+        """
+        Get details about the configured space.
+
+        This is useful for testing the connection and verifying credentials.
+
+        Returns:
+            The space details including id and name.
+
+        Raises:
+            PostFinanceError: If the request fails or credentials are invalid.
+        """
+        return self.get(f"/space/read?id={self.space_id}")
