@@ -1,19 +1,27 @@
 """
 PostFinance Checkout API client.
 
-Provides a client for communicating with the PostFinance Checkout REST API
-using JWT authentication with HMAC-SHA256 signing.
+Provides a wrapper around the official PostFinance Checkout Python SDK
+for use with the pretix payment plugin.
 """
 
-import base64
-import json
 import logging
-import time
+from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional
-from urllib.parse import urlparse
 
-import jwt
-import requests
+from postfinancecheckout import Configuration
+from postfinancecheckout.exceptions import ApiException
+from postfinancecheckout.models import (
+    LineItemCreate,
+    LineItemType,
+    Space,
+    Transaction,
+    TransactionCreate,
+)
+from postfinancecheckout.postfinancecheckout_sdk_exception import (
+    PostFinanceCheckoutSdkException,
+)
+from postfinancecheckout.service import SpacesService, TransactionsService
 
 logger = logging.getLogger(__name__)
 
@@ -21,31 +29,33 @@ logger = logging.getLogger(__name__)
 class PostFinanceError(Exception):
     """Base exception for PostFinance API errors."""
 
-    def __init__(self, message: str, response: Optional[requests.Response] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        error_code: Optional[str] = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
-        self.response = response
+        self.status_code = status_code
+        self.error_code = error_code
 
 
 class PostFinanceClient:
     """
-    Client for PostFinance Checkout API.
+    Client for PostFinance Checkout API using the official SDK.
 
-    Implements JWT authentication with HMAC-SHA256 signing per PostFinance specification.
+    Provides a simplified interface to the PostFinance Checkout SDK
+    for common payment operations.
 
     Attributes:
         space_id: The PostFinance space ID.
         user_id: The PostFinance user ID for authentication.
-        api_secret: The base64-encoded API secret key.
-        environment: Either 'sandbox' or 'production'.
+        api_secret: The API secret (authentication key).
+        environment: Either 'sandbox' or 'production' (for reference only,
+            SDK uses same endpoint for both).
     """
 
-    PRODUCTION_URL = "https://checkout.postfinance.ch"
-    # PostFinance doesn't have a separate sandbox URL - the same endpoint is used
-    # with sandbox/test space configurations
-    SANDBOX_URL = "https://checkout.postfinance.ch"
-
-    API_VERSION = "v2.0"
     DEFAULT_TIMEOUT = 30  # seconds
 
     def __init__(
@@ -61,250 +71,99 @@ class PostFinanceClient:
         Args:
             space_id: The PostFinance space ID.
             user_id: The PostFinance user ID for authentication.
-            api_secret: The base64-encoded API secret key.
+            api_secret: The API secret (authentication key).
             environment: Either 'sandbox' or 'production'. Defaults to 'production'.
+                Note: Both use the same API endpoint; environment is determined
+                by space configuration.
         """
         self.space_id = space_id
         self.user_id = user_id
         self.api_secret = api_secret
         self.environment = environment
-        self._session = requests.Session()
 
-    @property
-    def base_url(self) -> str:
-        """
-        Get the base URL for API requests based on the environment.
-
-        Returns:
-            The base URL string for the configured environment.
-        """
-        if self.environment == "sandbox":
-            return f"{self.SANDBOX_URL}/api/{self.API_VERSION}"
-        return f"{self.PRODUCTION_URL}/api/{self.API_VERSION}"
-
-    def _build_jwt_token(self, method: str, path: str) -> str:
-        """
-        Build a JWT token for authenticating a request.
-
-        The JWT is signed using HMAC-SHA256 with the base64-decoded API secret.
-
-        Args:
-            method: The HTTP method (GET, POST, etc.).
-            path: The API path (e.g., /space/read).
-
-        Returns:
-            The signed JWT token string.
-        """
-        # Decode the base64-encoded secret
-        decoded_secret = base64.b64decode(self.api_secret)
-
-        # Build the JWT payload
-        payload = {
-            "sub": self.user_id,
-            "iat": int(time.time()),
-            "requestPath": path,
-            "requestMethod": method.upper(),
-        }
-
-        # Custom headers per PostFinance spec
-        headers = {
-            "alg": "HS256",
-            "typ": "JWT",
-            "ver": 1,
-        }
-
-        # Sign and return the token
-        token: str = jwt.encode(payload, decoded_secret, algorithm="HS256", headers=headers)
-        return token
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        data: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Make an authenticated request to the PostFinance API.
-
-        Args:
-            method: The HTTP method (GET, POST, etc.).
-            path: The API path (without base URL).
-            params: Optional query parameters.
-            data: Optional JSON body data for POST/PUT requests.
-            timeout: Optional request timeout in seconds.
-
-        Returns:
-            The JSON response as a dictionary.
-
-        Raises:
-            PostFinanceError: If the request fails or returns an error response.
-        """
-        url = f"{self.base_url}{path}"
-        parsed_url = urlparse(url)
-        request_path = parsed_url.path
-
-        # Generate authentication token
-        token = self._build_jwt_token(method, request_path)
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-
-        request_timeout = timeout or self.DEFAULT_TIMEOUT
-
-        try:
-            response = self._session.request(
-                method=method.upper(),
-                url=url,
-                params=params,
-                json=data,
-                headers=headers,
-                timeout=request_timeout,
-            )
-        except requests.exceptions.Timeout as e:
-            raise PostFinanceError(f"Request timed out after {request_timeout} seconds") from e
-        except requests.exceptions.RequestException as e:
-            raise PostFinanceError(f"Request failed: {e}") from e
-
-        # Log request/response for debugging (without secrets)
-        logger.debug(
-            "PostFinance API request: %s %s -> %s",
-            method.upper(),
-            path,
-            response.status_code,
+        self._configuration = Configuration(
+            user_id=user_id,
+            authentication_key=api_secret,
+            request_timeout=self.DEFAULT_TIMEOUT,
         )
+        self._spaces_service = SpacesService(self._configuration)
+        self._transactions_service = TransactionsService(self._configuration)
 
-        if not response.ok:
-            error_message = f"API request failed with status {response.status_code}"
-            try:
-                error_data = response.json()
-                if "message" in error_data:
-                    error_message = f"{error_message}: {error_data['message']}"
-                logger.error(
-                    "PostFinance API error: %s %s -> %s: %s",
-                    method.upper(),
-                    path,
-                    response.status_code,
-                    json.dumps(error_data),
-                )
-            except json.JSONDecodeError:
-                logger.error(
-                    "PostFinance API error: %s %s -> %s: %s",
-                    method.upper(),
-                    path,
-                    response.status_code,
-                    response.text[:500],
-                )
-            raise PostFinanceError(error_message, response)
-
-        # Handle empty responses
-        if not response.content:
-            return {}
-
-        try:
-            result: Dict[str, Any] = response.json()
-            return result
-        except json.JSONDecodeError as e:
-            raise PostFinanceError(f"Invalid JSON response: {response.text[:500]}") from e
-
-    def get(
-        self,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Make an authenticated GET request.
-
-        Args:
-            path: The API path (without base URL).
-            params: Optional query parameters.
-            timeout: Optional request timeout in seconds.
-
-        Returns:
-            The JSON response as a dictionary.
-        """
-        return self._request("GET", path, params=params, timeout=timeout)
-
-    def post(
-        self,
-        path: str,
-        data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Make an authenticated POST request.
-
-        Args:
-            path: The API path (without base URL).
-            data: Optional JSON body data.
-            params: Optional query parameters.
-            timeout: Optional request timeout in seconds.
-
-        Returns:
-            The JSON response as a dictionary.
-        """
-        return self._request("POST", path, params=params, data=data, timeout=timeout)
-
-    def get_space(self) -> Dict[str, Any]:
+    def get_space(self) -> Space:
         """
         Get details about the configured space.
 
         This is useful for testing the connection and verifying credentials.
 
         Returns:
-            The space details including id and name.
+            The Space object with id, name, and other details.
 
         Raises:
             PostFinanceError: If the request fails or credentials are invalid.
         """
-        return self.get(f"/space/read?id={self.space_id}")
+        try:
+            return self._spaces_service.get_spaces_id(id=self.space_id)
+        except ApiException as e:
+            logger.error("PostFinance API error getting space: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting space: %s", e)
+            raise PostFinanceError(message=str(e)) from e
 
     def create_transaction(
         self,
         currency: str,
-        line_items: List[Dict[str, Any]],
+        line_items: List[LineItemCreate],
         success_url: str,
         failed_url: str,
         merchant_reference: Optional[str] = None,
         language: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> Transaction:
         """
         Create a new payment transaction.
 
         Args:
             currency: The three-letter currency code (e.g., 'CHF', 'EUR').
-            line_items: List of line items, each with: name, quantity, amountIncludingTax, type, uniqueId.
+            line_items: List of LineItemCreate objects for the transaction.
             success_url: URL to redirect to on successful payment.
             failed_url: URL to redirect to on failed/cancelled payment.
             merchant_reference: Optional merchant reference for this transaction.
             language: Optional language code for the payment page (e.g., 'en-US').
 
         Returns:
-            The created transaction object including 'id'.
+            The created Transaction object.
 
         Raises:
             PostFinanceError: If the request fails.
         """
-        data: Dict[str, Any] = {
-            "currency": currency,
-            "lineItems": line_items,
-            "successUrl": success_url,
-            "failedUrl": failed_url,
-        }
+        transaction_create = TransactionCreate(
+            currency=currency,
+            lineItems=line_items,
+            successUrl=success_url,
+            failedUrl=failed_url,
+            merchantReference=merchant_reference,
+            language=language,
+        )
 
-        if merchant_reference:
-            data["merchantReference"] = merchant_reference
-
-        if language:
-            data["language"] = language
-
-        return self.post("/payment/transactions", data=data)
+        try:
+            return self._transactions_service.post_payment_transactions(
+                space=self.space_id,
+                transaction_create=transaction_create,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error creating transaction: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error creating transaction: %s", e)
+            raise PostFinanceError(message=str(e)) from e
 
     def get_payment_page_url(self, transaction_id: int) -> str:
         """
@@ -319,14 +178,23 @@ class PostFinanceClient:
         Raises:
             PostFinanceError: If the request fails.
         """
-        response = self.get(f"/payment/transactions/{transaction_id}/payment-page-url")
-        if isinstance(response, dict) and "url" in response:
-            url: str = response["url"]
-            return url
-        result: str = str(response) if response else ""
-        return result
+        try:
+            return self._transactions_service.get_payment_transactions_id_payment_page_url(
+                id=transaction_id,
+                space=self.space_id,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error getting payment page URL: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting payment page URL: %s", e)
+            raise PostFinanceError(message=str(e)) from e
 
-    def get_transaction(self, transaction_id: int) -> Dict[str, Any]:
+    def get_transaction(self, transaction_id: int) -> Transaction:
         """
         Retrieve a transaction by its ID.
 
@@ -334,9 +202,52 @@ class PostFinanceClient:
             transaction_id: The ID of the transaction.
 
         Returns:
-            The transaction object.
+            The Transaction object.
 
         Raises:
             PostFinanceError: If the request fails.
         """
-        return self.get(f"/payment/transactions/{transaction_id}")
+        try:
+            return self._transactions_service.get_payment_transactions_id(
+                id=transaction_id,
+                space=self.space_id,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error getting transaction: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting transaction: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+
+def build_line_item(
+    name: str,
+    quantity: float,
+    amount_including_tax: float,
+    unique_id: str,
+    item_type: LineItemType = LineItemType.PRODUCT,
+) -> LineItemCreate:
+    """
+    Build a line item for a transaction.
+
+    Args:
+        name: The name of the product.
+        quantity: The number of items.
+        amount_including_tax: The total amount including tax.
+        unique_id: A unique identifier for this line item.
+        item_type: The type of line item (default: PRODUCT).
+
+    Returns:
+        A LineItemCreate object for use with create_transaction.
+    """
+    return LineItemCreate(
+        name=name,
+        quantity=quantity,
+        amountIncludingTax=amount_including_tax,
+        uniqueId=unique_id,
+        type=item_type,
+    )

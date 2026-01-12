@@ -8,6 +8,8 @@ from django.contrib import messages
 from django.http import HttpRequest
 from django.utils.translation import gettext_lazy as _
 
+from postfinancecheckout.models import LineItemCreate, LineItemType
+
 from pretix.base.models import OrderPayment
 from pretix.base.payment import BasePaymentProvider
 from pretix.multidomain.urlreverse import build_absolute_uri
@@ -195,8 +197,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         try:
             client = self._get_client()
-            space_info = client.get_space()
-            space_name = space_info.get("name", str(_("Unknown")))
+            space = client.get_space()
+            space_name = space.name if space.name else str(_("Unknown"))
             return (
                 True,
                 str(
@@ -206,7 +208,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 ),
             )
         except PostFinanceError as e:
-            if e.response is not None and e.response.status_code == 401:
+            if e.status_code == 401:
                 return (
                     False,
                     str(
@@ -216,7 +218,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         )
                     ),
                 )
-            elif e.response is not None and e.response.status_code == 404:
+            elif e.status_code == 404:
                 return (
                     False,
                     str(
@@ -240,7 +242,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def _build_line_items(
         self, cart: Dict[str, Any], currency: str
-    ) -> List[Dict[str, Any]]:
+    ) -> List[LineItemCreate]:
         """
         Build PostFinance line items from pretix cart.
 
@@ -249,19 +251,19 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             currency: The currency code.
 
         Returns:
-            List of line items for PostFinance API.
+            List of LineItemCreate objects for PostFinance API.
         """
-        line_items: List[Dict[str, Any]] = []
+        line_items: List[LineItemCreate] = []
         total = cart.get("total", Decimal("0"))
 
         line_items.append(
-            {
-                "name": str(_("Order Total")),
-                "quantity": 1,
-                "amountIncludingTax": float(total),
-                "type": "PRODUCT",
-                "uniqueId": "order-total",
-            }
+            LineItemCreate(
+                name=str(_("Order Total")),
+                quantity=1,
+                amountIncludingTax=float(total),
+                type=LineItemType.PRODUCT,
+                uniqueId="order-total",
+            )
         )
 
         return line_items
@@ -309,7 +311,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 merchant_reference=merchant_reference,
             )
 
-            transaction_id = transaction.get("id")
+            transaction_id = transaction.id
             if not transaction_id:
                 logger.error("PostFinance transaction missing ID: %s", transaction)
                 messages.error(
@@ -385,12 +387,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             client = self._get_client()
             transaction = client.get_transaction(transaction_id)
 
+            payment_method = None
+            if transaction.payment_connector_configuration:
+                payment_method = transaction.payment_connector_configuration.name
+
             payment.info_data = {
                 "transaction_id": transaction_id,
-                "state": transaction.get("state"),
-                "payment_method": transaction.get("paymentConnectorConfiguration", {})
-                .get("name"),
-                "created_on": transaction.get("createdOn"),
+                "state": transaction.state.value if transaction.state else None,
+                "payment_method": payment_method,
+                "created_on": str(transaction.created_on) if transaction.created_on else None,
             }
             payment.save(update_fields=["info"])
 
