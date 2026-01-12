@@ -20,7 +20,11 @@ from postfinancecheckout.models import (
 from postfinancecheckout.postfinancecheckout_sdk_exception import (
     PostFinanceCheckoutSdkException,
 )
-from postfinancecheckout.service import SpacesService, TransactionsService
+from postfinancecheckout.service import (
+    SpacesService,
+    TransactionsService,
+    WebhookEncryptionKeysService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +91,7 @@ class PostFinanceClient:
         )
         self._spaces_service = SpacesService(self._configuration)
         self._transactions_service = TransactionsService(self._configuration)
+        self._webhook_encryption_service = WebhookEncryptionKeysService(self._configuration)
 
     def get_space(self) -> Space:
         """
@@ -220,6 +225,46 @@ class PostFinanceClient:
             ) from e
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting transaction: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def is_webhook_signature_valid(
+        self,
+        signature_header: str,
+        content: str,
+    ) -> bool:
+        """
+        Validate webhook signature using the SDK's encryption service.
+
+        Uses the X-Signature header and raw request body to verify that
+        the webhook payload was actually sent by PostFinance and hasn't
+        been tampered with.
+
+        Args:
+            signature_header: The value of the X-Signature HTTP header.
+            content: The raw request body as a string.
+
+        Returns:
+            True if the signature is valid, False otherwise.
+
+        Raises:
+            PostFinanceError: If there's an error validating the signature
+                (e.g., invalid header format, unknown key ID).
+        """
+        try:
+            result = self._webhook_encryption_service.is_content_valid(
+                signature_header=signature_header,
+                content_to_verify=content,
+            )
+            return bool(result)
+        except ApiException as e:
+            logger.error("PostFinance API error validating webhook signature: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error validating webhook signature: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
 
