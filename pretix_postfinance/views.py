@@ -4,17 +4,18 @@ Views for PostFinance payment plugin.
 Handles return URLs from PostFinance payment page and webhook callbacks.
 """
 
+import json
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from django.contrib import messages
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 from django.views import View
-
+from django.views.decorators.csrf import csrf_exempt
 from postfinancecheckout.models import TransactionState
-
 from pretix.base.models import Event, Order, OrderPayment
 from pretix.multidomain.urlreverse import eventreverse
 
@@ -282,3 +283,74 @@ class PostFinanceReturnView(View):
                 "secret": order.secret,
             })
         )
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class PostFinanceWebhookView(View):
+    """
+    Handle webhook notifications from PostFinance.
+
+    PostFinance sends webhook notifications when transaction states change.
+    This endpoint receives and processes those notifications.
+    """
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        """
+        Process incoming webhook notification from PostFinance.
+
+        Args:
+            request: The HTTP request containing the webhook payload.
+
+        Returns:
+            HttpResponse with status 200 on success, 400 on malformed requests.
+        """
+        try:
+            payload = self._parse_payload(request)
+        except ValueError as e:
+            logger.warning("PostFinance webhook: malformed request - %s", e)
+            return JsonResponse(
+                {"error": "Malformed request", "detail": str(e)},
+                status=400,
+            )
+
+        logger.info(
+            "PostFinance webhook received: entityId=%s, listenerEntityId=%s, state=%s",
+            payload.get("entityId"),
+            payload.get("listenerEntityId"),
+            payload.get("state"),
+        )
+
+        # Return 200 OK to acknowledge receipt
+        # Actual state processing will be implemented in US-012
+        return HttpResponse(status=200)
+
+    def _parse_payload(self, request: HttpRequest) -> Dict[str, Any]:
+        """
+        Parse and validate the webhook payload.
+
+        Args:
+            request: The HTTP request containing the webhook payload.
+
+        Returns:
+            The parsed JSON payload as a dictionary.
+
+        Raises:
+            ValueError: If the payload cannot be parsed or is invalid.
+        """
+        content_type = request.content_type or ""
+
+        if "application/json" not in content_type:
+            raise ValueError(f"Invalid content type: {content_type}")
+
+        if not request.body:
+            raise ValueError("Empty request body")
+
+        try:
+            payload = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON: {e}")
+
+        if not isinstance(payload, dict):
+            raise ValueError("Payload must be a JSON object")
+
+        return payload

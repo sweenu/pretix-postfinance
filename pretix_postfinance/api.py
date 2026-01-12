@@ -6,8 +6,7 @@ for use with the pretix payment plugin.
 """
 
 import logging
-from decimal import Decimal
-from typing import Any, Dict, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from postfinancecheckout import Configuration
 from postfinancecheckout.exceptions import ApiException

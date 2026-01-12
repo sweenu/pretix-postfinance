@@ -7,9 +7,7 @@ from django import forms
 from django.contrib import messages
 from django.http import HttpRequest
 from django.utils.translation import gettext_lazy as _
-
 from postfinancecheckout.models import LineItemCreate, LineItemType, TransactionState
-
 from pretix.base.models import OrderPayment
 from pretix.base.payment import BasePaymentProvider
 from pretix.multidomain.urlreverse import build_absolute_uri
