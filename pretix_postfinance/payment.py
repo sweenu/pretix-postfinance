@@ -8,7 +8,7 @@ from django.contrib import messages
 from django.http import HttpRequest
 from django.utils.translation import gettext_lazy as _
 
-from postfinancecheckout.models import LineItemCreate, LineItemType
+from postfinancecheckout.models import LineItemCreate, LineItemType, TransactionState
 
 from pretix.base.models import OrderPayment
 from pretix.base.payment import BasePaymentProvider
@@ -17,6 +17,23 @@ from pretix.multidomain.urlreverse import build_absolute_uri
 from .api import PostFinanceClient, PostFinanceError
 
 logger = logging.getLogger(__name__)
+
+
+# PostFinance transaction states that indicate successful payment
+SUCCESS_STATES = {
+    TransactionState.AUTHORIZED,
+    TransactionState.COMPLETED,
+    TransactionState.FULFILL,
+    TransactionState.CONFIRMED,
+    TransactionState.PROCESSING,
+}
+
+# PostFinance transaction states that indicate failed payment
+FAILURE_STATES = {
+    TransactionState.FAILED,
+    TransactionState.DECLINE,
+    TransactionState.VOIDED,
+}
 
 
 class PostFinancePaymentProvider(BasePaymentProvider):
@@ -362,8 +379,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Execute the payment after the order is confirmed.
 
-        Retrieves the transaction details from PostFinance and stores
-        the transaction ID in the payment info.
+        Retrieves the transaction details from PostFinance, checks the
+        transaction state, and confirms or fails the payment accordingly.
 
         Args:
             request: The HTTP request object.
@@ -391,20 +408,55 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             if transaction.payment_connector_configuration:
                 payment_method = transaction.payment_connector_configuration.name
 
+            state = transaction.state
             payment.info_data = {
                 "transaction_id": transaction_id,
-                "state": transaction.state.value if transaction.state else None,
+                "state": state.value if state else None,
                 "payment_method": payment_method,
                 "created_on": str(transaction.created_on) if transaction.created_on else None,
             }
             payment.save(update_fields=["info"])
 
             logger.info(
-                "Stored PostFinance transaction %s for payment %s",
+                "PostFinance transaction %s has state %s for payment %s",
                 transaction_id,
+                state,
                 payment.pk,
             )
 
+            # Handle different transaction states
+            if state in SUCCESS_STATES:
+                try:
+                    payment.confirm()
+                    logger.info(
+                        "Payment %s confirmed (PostFinance state: %s)",
+                        payment.pk,
+                        state,
+                    )
+                except Exception as e:
+                    # Log but don't fail - payment was successful even if
+                    # confirmation has issues (e.g., quota exceeded)
+                    logger.exception(
+                        "Error confirming payment %s: %s",
+                        payment.pk,
+                        e,
+                    )
+            elif state in FAILURE_STATES:
+                payment.fail(info={"state": state.value if state else None})
+                logger.info(
+                    "Payment %s failed (PostFinance state: %s)",
+                    payment.pk,
+                    state,
+                )
+            else:
+                # Transaction is still pending (CREATE, PENDING, etc.)
+                logger.info(
+                    "Payment %s is pending (PostFinance state: %s)",
+                    payment.pk,
+                    state,
+                )
+
+            # Clean up session
             del request.session["payment_postfinance_transaction_id"]
 
         except PostFinanceError as e:
