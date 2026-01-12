@@ -19,7 +19,19 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     identifier = "postfinance"
     verbose_name = _("PostFinance")
-    public_name = _("PostFinance")
+
+    @property
+    def public_name(self) -> str:
+        """
+        Return the name shown to customers during checkout.
+
+        If a custom display name is configured in event settings, use that.
+        Otherwise fall back to the default verbose name.
+        """
+        custom_name = self.settings.get("display_name")
+        if custom_name:
+            return str(custom_name)
+        return str(_("PostFinance"))
 
     def checkout_confirm_render(self, request, order=None) -> str:
         """
@@ -27,7 +39,13 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         This is displayed to the customer before they confirm their order
         to summarize what will happen during payment.
+
+        If a custom description is configured in event settings, use that.
+        Otherwise fall back to the default message.
         """
+        custom_description = self.settings.get("description")
+        if custom_description:
+            return str(custom_description)
         return str(
             _(
                 "You will be redirected to PostFinance to complete your payment. "
@@ -98,6 +116,29 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         ],
                         initial="sandbox",
                         required=True,
+                    ),
+                ),
+                (
+                    "display_name",
+                    forms.CharField(
+                        label=_("Display Name"),
+                        help_text=_(
+                            "Custom name shown to customers during checkout. "
+                            "Leave empty to use the default name 'PostFinance'."
+                        ),
+                        required=False,
+                    ),
+                ),
+                (
+                    "description",
+                    forms.CharField(
+                        label=_("Description"),
+                        help_text=_(
+                            "Custom description shown on the checkout page. "
+                            "Leave empty to use the default message."
+                        ),
+                        widget=forms.Textarea(attrs={"rows": 3}),
+                        required=False,
                     ),
                 ),
             ]
