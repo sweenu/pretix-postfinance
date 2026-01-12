@@ -14,6 +14,8 @@ setup(
     python_requires='>=3.9',
     install_requires=[
         'pretix>=2024.1.0',
+        'PyJWT>=2.0.0',
+        'requests>=2.25.0',
     ],
     entry_points={
         'pretix.plugin': [
