@@ -1,12 +1,20 @@
+import logging
 from collections import OrderedDict
-from typing import Any, Tuple
+from decimal import Decimal
+from typing import Any, Dict, List, Tuple, Union
 
 from django import forms
+from django.contrib import messages
+from django.http import HttpRequest
 from django.utils.translation import gettext_lazy as _
 
+from pretix.base.models import OrderPayment
 from pretix.base.payment import BasePaymentProvider
+from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .api import PostFinanceClient, PostFinanceError
+
+logger = logging.getLogger(__name__)
 
 
 class PostFinancePaymentProvider(BasePaymentProvider):
@@ -221,24 +229,195 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         except Exception as e:
             return (False, str(_("Unexpected error: {error}").format(error=str(e))))
 
-    def payment_is_valid_session(self, request) -> bool:
+    def payment_is_valid_session(self, request: HttpRequest) -> bool:
         """
         Check if the user session contains valid payment information.
-        """
-        return True
 
-    def checkout_prepare(self, request, cart):
+        For PostFinance, we need a transaction ID in the session that was
+        created during checkout_prepare.
+        """
+        return request.session.get("payment_postfinance_transaction_id") is not None
+
+    def _build_line_items(
+        self, cart: Dict[str, Any], currency: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Build PostFinance line items from pretix cart.
+
+        Args:
+            cart: The pretix cart dictionary with 'total' and 'positions'.
+            currency: The currency code.
+
+        Returns:
+            List of line items for PostFinance API.
+        """
+        line_items: List[Dict[str, Any]] = []
+        total = cart.get("total", Decimal("0"))
+
+        line_items.append(
+            {
+                "name": str(_("Order Total")),
+                "quantity": 1,
+                "amountIncludingTax": float(total),
+                "type": "PRODUCT",
+                "uniqueId": "order-total",
+            }
+        )
+
+        return line_items
+
+    def checkout_prepare(
+        self, request: HttpRequest, cart: Dict[str, Any]
+    ) -> Union[bool, str]:
         """
         Prepare the checkout for payment.
 
-        Called when the user proceeds to the payment step.
-        """
-        return True
+        Creates a PostFinance transaction and returns the payment page URL
+        to redirect the customer to PostFinance for payment.
 
-    def execute_payment(self, request, payment):
-        """
-        Execute the payment.
+        Args:
+            request: The HTTP request object.
+            cart: The cart dictionary containing items and total.
 
-        Called when the order is confirmed.
+        Returns:
+            The PostFinance payment page URL to redirect to, or False on error.
         """
-        pass
+        try:
+            client = self._get_client()
+            currency = self.event.currency
+
+            line_items = self._build_line_items(cart, currency)
+
+            success_url = build_absolute_uri(
+                self.event,
+                "presale:event.checkout",
+                kwargs={"step": "confirm"},
+            )
+            failed_url = build_absolute_uri(
+                self.event,
+                "presale:event.checkout",
+                kwargs={"step": "payment"},
+            )
+
+            merchant_reference = f"pretix-{self.event.slug}"
+
+            transaction = client.create_transaction(
+                currency=currency,
+                line_items=line_items,
+                success_url=success_url,
+                failed_url=failed_url,
+                merchant_reference=merchant_reference,
+            )
+
+            transaction_id = transaction.get("id")
+            if not transaction_id:
+                logger.error("PostFinance transaction missing ID: %s", transaction)
+                messages.error(
+                    request,
+                    str(_("Failed to create payment. Please try again.")),
+                )
+                return False
+
+            request.session["payment_postfinance_transaction_id"] = transaction_id
+            logger.info(
+                "Created PostFinance transaction %s for event %s",
+                transaction_id,
+                self.event.slug,
+            )
+
+            payment_page_url = client.get_payment_page_url(transaction_id)
+            if not payment_page_url:
+                logger.error(
+                    "Failed to get payment page URL for transaction %s",
+                    transaction_id,
+                )
+                messages.error(
+                    request,
+                    str(_("Failed to redirect to payment page. Please try again.")),
+                )
+                return False
+
+            return payment_page_url
+
+        except PostFinanceError as e:
+            logger.exception("PostFinance API error during checkout_prepare: %s", e)
+            messages.error(
+                request,
+                str(_("Payment service error. Please try again later.")),
+            )
+            return False
+        except Exception as e:
+            logger.exception("Unexpected error during checkout_prepare: %s", e)
+            messages.error(
+                request,
+                str(_("An unexpected error occurred. Please try again.")),
+            )
+            return False
+
+    def execute_payment(
+        self, request: HttpRequest, payment: OrderPayment
+    ) -> Union[str, None]:
+        """
+        Execute the payment after the order is confirmed.
+
+        Retrieves the transaction details from PostFinance and stores
+        the transaction ID in the payment info.
+
+        Args:
+            request: The HTTP request object.
+            payment: The OrderPayment object.
+
+        Returns:
+            None on success, or a URL to redirect to.
+        """
+        transaction_id = request.session.get("payment_postfinance_transaction_id")
+
+        if not transaction_id:
+            logger.warning(
+                "No PostFinance transaction ID in session for payment %s",
+                payment.pk,
+            )
+            payment.info_data = {"error": "No transaction ID in session"}
+            payment.save(update_fields=["info"])
+            return None
+
+        try:
+            client = self._get_client()
+            transaction = client.get_transaction(transaction_id)
+
+            payment.info_data = {
+                "transaction_id": transaction_id,
+                "state": transaction.get("state"),
+                "payment_method": transaction.get("paymentConnectorConfiguration", {})
+                .get("name"),
+                "created_on": transaction.get("createdOn"),
+            }
+            payment.save(update_fields=["info"])
+
+            logger.info(
+                "Stored PostFinance transaction %s for payment %s",
+                transaction_id,
+                payment.pk,
+            )
+
+            del request.session["payment_postfinance_transaction_id"]
+
+        except PostFinanceError as e:
+            logger.exception(
+                "PostFinance API error during execute_payment: %s", e
+            )
+            payment.info_data = {
+                "transaction_id": transaction_id,
+                "error": str(e),
+            }
+            payment.save(update_fields=["info"])
+
+        except Exception as e:
+            logger.exception("Unexpected error during execute_payment: %s", e)
+            payment.info_data = {
+                "transaction_id": transaction_id,
+                "error": str(e),
+            }
+            payment.save(update_fields=["info"])
+
+        return None

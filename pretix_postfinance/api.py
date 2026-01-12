@@ -9,7 +9,7 @@ import base64
 import json
 import logging
 import time
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
 import jwt
@@ -264,3 +264,79 @@ class PostFinanceClient:
             PostFinanceError: If the request fails or credentials are invalid.
         """
         return self.get(f"/space/read?id={self.space_id}")
+
+    def create_transaction(
+        self,
+        currency: str,
+        line_items: List[Dict[str, Any]],
+        success_url: str,
+        failed_url: str,
+        merchant_reference: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new payment transaction.
+
+        Args:
+            currency: The three-letter currency code (e.g., 'CHF', 'EUR').
+            line_items: List of line items, each with: name, quantity, amountIncludingTax, type, uniqueId.
+            success_url: URL to redirect to on successful payment.
+            failed_url: URL to redirect to on failed/cancelled payment.
+            merchant_reference: Optional merchant reference for this transaction.
+            language: Optional language code for the payment page (e.g., 'en-US').
+
+        Returns:
+            The created transaction object including 'id'.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        data: Dict[str, Any] = {
+            "currency": currency,
+            "lineItems": line_items,
+            "successUrl": success_url,
+            "failedUrl": failed_url,
+        }
+
+        if merchant_reference:
+            data["merchantReference"] = merchant_reference
+
+        if language:
+            data["language"] = language
+
+        return self.post("/payment/transactions", data=data)
+
+    def get_payment_page_url(self, transaction_id: int) -> str:
+        """
+        Get the URL for the payment page for a transaction.
+
+        Args:
+            transaction_id: The ID of the transaction.
+
+        Returns:
+            The URL to redirect the customer to for payment.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        response = self.get(f"/payment/transactions/{transaction_id}/payment-page-url")
+        if isinstance(response, dict) and "url" in response:
+            url: str = response["url"]
+            return url
+        result: str = str(response) if response else ""
+        return result
+
+    def get_transaction(self, transaction_id: int) -> Dict[str, Any]:
+        """
+        Retrieve a transaction by its ID.
+
+        Args:
+            transaction_id: The ID of the transaction.
+
+        Returns:
+            The transaction object.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        return self.get(f"/payment/transactions/{transaction_id}")
