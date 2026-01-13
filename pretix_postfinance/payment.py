@@ -497,6 +497,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             payment.info_data = {
                 "transaction_id": transaction_id,
                 "error": str(e),
+                "error_code": e.error_code,
+                "error_status_code": e.status_code,
             }
             payment.save(update_fields=["info"])
 
@@ -505,6 +507,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             payment.info_data = {
                 "transaction_id": transaction_id,
                 "error": str(e),
+                "error_code": type(e).__name__,
             }
             payment.save(update_fields=["info"])
 
@@ -557,6 +560,25 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "<strong>{label}:</strong> {value}",
                     label=_("Payment Method"),
                     value=payment_method,
+                )
+            )
+
+        # Show error details if any (for admin troubleshooting)
+        error_message = info_data.get("error")
+        if error_message:
+            error_code = info_data.get("error_code")
+            error_status = info_data.get("error_status_code")
+            error_parts = [str(error_message)]
+            if error_code:
+                error_parts.append(f"Code: {error_code}")
+            if error_status:
+                error_parts.append(f"HTTP {error_status}")
+            parts.append(
+                format_html(
+                    '<strong style="color: #c00;">{label}:</strong> '
+                    '<span style="color: #c00;">{value}</span>',
+                    label=_("Error"),
+                    value=" | ".join(error_parts),
                 )
             )
 
