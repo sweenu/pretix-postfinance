@@ -1,7 +1,8 @@
 """
 Views for PostFinance payment plugin.
 
-Handles return URLs from PostFinance payment page and webhook callbacks.
+Handles return URLs from PostFinance payment page, webhook callbacks,
+and admin actions like capture.
 """
 
 import json
@@ -17,6 +18,7 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from postfinancecheckout.models import TransactionState
 from pretix.base.models import Event, Order, OrderPayment
+from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.multidomain.urlreverse import eventreverse
 
 from .api import PostFinanceClient, PostFinanceError
@@ -732,3 +734,73 @@ class PostFinanceWebhookView(View):
             raise ValueError("Payload must be a JSON object")
 
         return payload
+
+
+class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
+    """
+    Handle manual capture requests from the admin panel.
+
+    This view is called when an administrator clicks the "Capture Payment"
+    button for an AUTHORIZED payment. It completes the transaction via
+    the PostFinance API.
+    """
+
+    permission = "can_change_orders"
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        """
+        Process the capture request.
+
+        Args:
+            request: The HTTP request.
+
+        Returns:
+            Redirect to the order page with success or error message.
+        """
+        order_code = kwargs.get("order")
+        payment_pk = kwargs.get("payment")
+
+        order = get_object_or_404(
+            Order,
+            code=order_code,
+            event=request.event,
+        )
+        payment = get_object_or_404(
+            OrderPayment,
+            pk=payment_pk,
+            order=order,
+            provider="postfinance",
+        )
+
+        # Get the payment provider and execute capture
+        provider = payment.payment_provider
+        success, error_message = provider.execute_capture(payment)
+
+        if success:
+            messages.success(
+                request,
+                str(_("Payment captured successfully.")),
+            )
+            logger.info(
+                "Admin capture successful for payment %s by user %s",
+                payment.pk,
+                request.user.pk if request.user else "anonymous",
+            )
+        else:
+            messages.error(
+                request,
+                error_message or str(_("Failed to capture payment.")),
+            )
+            logger.warning(
+                "Admin capture failed for payment %s: %s",
+                payment.pk,
+                error_message,
+            )
+
+        # Redirect back to the order page
+        return redirect(
+            "control:event.order",
+            organizer=request.event.organizer.slug,
+            event=request.event.slug,
+            code=order.code,
+        )

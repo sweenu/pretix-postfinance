@@ -1,11 +1,13 @@
 import logging
 from collections import OrderedDict
 from decimal import Decimal
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from django import forms
 from django.contrib import messages
 from django.http import HttpRequest
+from django.urls import reverse
+from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 from postfinancecheckout.models import (
     LineItemCreate,
@@ -507,3 +509,167 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             payment.save(update_fields=["info"])
 
         return None
+
+    def payment_control_render(
+        self, request: HttpRequest, payment: OrderPayment
+    ) -> str:
+        """
+        Render payment control HTML for the admin order view.
+
+        Displays PostFinance transaction details and, for AUTHORIZED payments,
+        provides a capture button to manually complete the transaction.
+
+        Args:
+            request: The HTTP request object.
+            payment: The OrderPayment object.
+
+        Returns:
+            HTML string to display in the admin panel.
+        """
+        info_data = payment.info_data or {}
+        transaction_id = info_data.get("transaction_id")
+        state = info_data.get("state")
+        payment_method = info_data.get("payment_method")
+
+        parts: List[str] = []
+
+        if transaction_id:
+            parts.append(
+                format_html(
+                    "<strong>{label}:</strong> {value}",
+                    label=_("Transaction ID"),
+                    value=transaction_id,
+                )
+            )
+
+        if state:
+            parts.append(
+                format_html(
+                    "<strong>{label}:</strong> {value}",
+                    label=_("State"),
+                    value=state,
+                )
+            )
+
+        if payment_method:
+            parts.append(
+                format_html(
+                    "<strong>{label}:</strong> {value}",
+                    label=_("Payment Method"),
+                    value=payment_method,
+                )
+            )
+
+        # Show capture button for AUTHORIZED transactions
+        if state == TransactionState.AUTHORIZED.value:
+            capture_url = reverse(
+                "plugins:pretix_postfinance:postfinance.capture",
+                kwargs={
+                    "organizer": self.event.organizer.slug,
+                    "event": self.event.slug,
+                    "order": payment.order.code,
+                    "payment": payment.pk,
+                },
+            )
+            parts.append(
+                format_html(
+                    '<form action="{url}" method="POST" style="margin-top: 10px;">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
+                    '<button type="submit" class="btn btn-primary btn-sm">'
+                    '{button_text}'
+                    '</button>'
+                    '</form>',
+                    url=capture_url,
+                    csrf=request.META.get("CSRF_COOKIE", ""),
+                    button_text=_("Capture Payment"),
+                )
+            )
+
+        if parts:
+            return "<br>".join(parts)
+        return ""
+
+    def execute_capture(
+        self, payment: OrderPayment
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Capture (complete) an authorized transaction.
+
+        This method is called from the capture view to manually complete
+        a transaction that is in the AUTHORIZED state.
+
+        Args:
+            payment: The OrderPayment to capture.
+
+        Returns:
+            A tuple of (success: bool, error_message: Optional[str]).
+            On success, error_message is None.
+            On failure, error_message contains the error description.
+        """
+        info_data = payment.info_data or {}
+        transaction_id = info_data.get("transaction_id")
+
+        if not transaction_id:
+            return (False, str(_("Transaction ID not found.")))
+
+        # Check if transaction is in AUTHORIZED state
+        current_state = info_data.get("state")
+        if current_state != TransactionState.AUTHORIZED.value:
+            return (
+                False,
+                str(
+                    _("Transaction cannot be captured. Current state: {state}").format(
+                        state=current_state or "Unknown"
+                    )
+                ),
+            )
+
+        try:
+            client = self._get_client()
+            completion = client.complete_transaction(int(transaction_id))
+
+            # Update payment info with completion details
+            info_data["state"] = TransactionState.COMPLETED.value
+            if completion.id:
+                info_data["completion_id"] = completion.id
+            payment.info_data = info_data
+            payment.save(update_fields=["info"])
+
+            logger.info(
+                "PostFinance transaction %s captured successfully for payment %s",
+                transaction_id,
+                payment.pk,
+            )
+
+            # Confirm the payment in pretix
+            try:
+                payment.confirm()
+                logger.info(
+                    "Payment %s confirmed after capture",
+                    payment.pk,
+                )
+            except Exception as e:
+                # Log but don't fail - capture was successful even if
+                # confirmation has issues (e.g., quota exceeded)
+                logger.exception(
+                    "Error confirming payment %s after capture: %s",
+                    payment.pk,
+                    e,
+                )
+
+            return (True, None)
+
+        except PostFinanceError as e:
+            logger.exception(
+                "PostFinance API error capturing transaction %s: %s",
+                transaction_id,
+                e,
+            )
+            return (False, str(_("Capture failed: {error}").format(error=str(e))))
+        except Exception as e:
+            logger.exception(
+                "Unexpected error capturing transaction %s: %s",
+                transaction_id,
+                e,
+            )
+            return (False, str(_("Unexpected error: {error}").format(error=str(e))))

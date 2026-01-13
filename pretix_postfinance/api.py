@@ -15,6 +15,7 @@ from postfinancecheckout.models import (
     LineItemType,
     Space,
     Transaction,
+    TransactionCompletion,
     TransactionCompletionBehavior,
     TransactionCreate,
 )
@@ -231,6 +232,39 @@ class PostFinanceClient:
             ) from e
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting transaction: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def complete_transaction(self, transaction_id: int) -> TransactionCompletion:
+        """
+        Complete (capture) an authorized transaction.
+
+        This completes a transaction that is in the AUTHORIZED state,
+        capturing the authorized funds.
+
+        Args:
+            transaction_id: The ID of the transaction to complete.
+
+        Returns:
+            The TransactionCompletion object with completion details.
+
+        Raises:
+            PostFinanceError: If the request fails (e.g., transaction not
+                in AUTHORIZED state, already completed, etc.).
+        """
+        try:
+            return self._transactions_service.post_payment_transactions_id_complete_online(
+                id=transaction_id,
+                space=self.space_id,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error completing transaction: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error completing transaction: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
     def is_webhook_signature_valid(
