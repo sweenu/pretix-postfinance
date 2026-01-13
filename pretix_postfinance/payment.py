@@ -560,7 +560,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 )
             )
 
-        # Show capture button for AUTHORIZED transactions
+        # Show capture and void buttons for AUTHORIZED transactions
         if state == TransactionState.AUTHORIZED.value:
             capture_url = reverse(
                 "plugins:pretix_postfinance:postfinance.capture",
@@ -571,17 +571,35 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "payment": payment.pk,
                 },
             )
+            void_url = reverse(
+                "plugins:pretix_postfinance:postfinance.void",
+                kwargs={
+                    "organizer": self.event.organizer.slug,
+                    "event": self.event.slug,
+                    "order": payment.order.code,
+                    "payment": payment.pk,
+                },
+            )
             parts.append(
                 format_html(
-                    '<form action="{url}" method="POST" style="margin-top: 10px;">'
+                    '<form action="{capture_url}" method="POST" style="margin-top: 10px; display: inline-block;">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
                     '<button type="submit" class="btn btn-primary btn-sm">'
-                    '{button_text}'
+                    '{capture_text}'
+                    '</button>'
+                    '</form>'
+                    '&nbsp;'
+                    '<form action="{void_url}" method="POST" style="margin-top: 10px; display: inline-block;">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
+                    '<button type="submit" class="btn btn-danger btn-sm">'
+                    '{void_text}'
                     '</button>'
                     '</form>',
-                    url=capture_url,
+                    capture_url=capture_url,
+                    void_url=void_url,
                     csrf=request.META.get("CSRF_COOKIE", ""),
-                    button_text=_("Capture Payment"),
+                    capture_text=_("Capture Payment"),
+                    void_text=_("Void Payment"),
                 )
             )
 
@@ -669,6 +687,89 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         except Exception as e:
             logger.exception(
                 "Unexpected error capturing transaction %s: %s",
+                transaction_id,
+                e,
+            )
+            return (False, str(_("Unexpected error: {error}").format(error=str(e))))
+
+    def execute_void(
+        self, payment: OrderPayment
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Void an authorized transaction.
+
+        This method is called from the void view to void a transaction
+        that is in the AUTHORIZED state, releasing the authorization hold.
+
+        Args:
+            payment: The OrderPayment to void.
+
+        Returns:
+            A tuple of (success: bool, error_message: Optional[str]).
+            On success, error_message is None.
+            On failure, error_message contains the error description.
+        """
+        info_data = payment.info_data or {}
+        transaction_id = info_data.get("transaction_id")
+
+        if not transaction_id:
+            return (False, str(_("Transaction ID not found.")))
+
+        # Check if transaction is in AUTHORIZED state
+        current_state = info_data.get("state")
+        if current_state != TransactionState.AUTHORIZED.value:
+            return (
+                False,
+                str(
+                    _("Transaction cannot be voided. Current state: {state}").format(
+                        state=current_state or "Unknown"
+                    )
+                ),
+            )
+
+        try:
+            client = self._get_client()
+            void_result = client.void_transaction(int(transaction_id))
+
+            # Update payment info with void details
+            info_data["state"] = TransactionState.VOIDED.value
+            if void_result.id:
+                info_data["void_id"] = void_result.id
+            payment.info_data = info_data
+            payment.save(update_fields=["info"])
+
+            logger.info(
+                "PostFinance transaction %s voided successfully for payment %s",
+                transaction_id,
+                payment.pk,
+            )
+
+            # Fail the payment in pretix (void means the payment won't be captured)
+            try:
+                payment.fail(info={"state": TransactionState.VOIDED.value})
+                logger.info(
+                    "Payment %s marked as failed after void",
+                    payment.pk,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Error failing payment %s after void: %s",
+                    payment.pk,
+                    e,
+                )
+
+            return (True, None)
+
+        except PostFinanceError as e:
+            logger.exception(
+                "PostFinance API error voiding transaction %s: %s",
+                transaction_id,
+                e,
+            )
+            return (False, str(_("Void failed: {error}").format(error=str(e))))
+        except Exception as e:
+            logger.exception(
+                "Unexpected error voiding transaction %s: %s",
                 transaction_id,
                 e,
             )

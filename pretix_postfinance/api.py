@@ -18,6 +18,7 @@ from postfinancecheckout.models import (
     TransactionCompletion,
     TransactionCompletionBehavior,
     TransactionCreate,
+    TransactionVoid,
 )
 from postfinancecheckout.postfinancecheckout_sdk_exception import (
     PostFinanceCheckoutSdkException,
@@ -265,6 +266,39 @@ class PostFinanceClient:
             ) from e
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error completing transaction: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def void_transaction(self, transaction_id: int) -> TransactionVoid:
+        """
+        Void an authorized transaction.
+
+        This voids a transaction that is in the AUTHORIZED state,
+        releasing the authorized funds back to the customer.
+
+        Args:
+            transaction_id: The ID of the transaction to void.
+
+        Returns:
+            The TransactionVoid object with void details.
+
+        Raises:
+            PostFinanceError: If the request fails (e.g., transaction not
+                in AUTHORIZED state, already voided, etc.).
+        """
+        try:
+            return self._transactions_service.post_payment_transactions_id_void_online(
+                id=transaction_id,
+                space=self.space_id,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error voiding transaction: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error voiding transaction: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
     def is_webhook_signature_valid(

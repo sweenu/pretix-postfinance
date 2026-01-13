@@ -804,3 +804,73 @@ class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
             event=request.event.slug,
             code=order.code,
         )
+
+
+class PostFinanceVoidView(EventPermissionRequiredMixin, View):
+    """
+    Handle void requests from the admin panel.
+
+    This view is called when an administrator clicks the "Void Payment"
+    button for an AUTHORIZED payment. It voids the transaction via
+    the PostFinance API, releasing the authorization hold.
+    """
+
+    permission = "can_change_orders"
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        """
+        Process the void request.
+
+        Args:
+            request: The HTTP request.
+
+        Returns:
+            Redirect to the order page with success or error message.
+        """
+        order_code = kwargs.get("order")
+        payment_pk = kwargs.get("payment")
+
+        order = get_object_or_404(
+            Order,
+            code=order_code,
+            event=request.event,
+        )
+        payment = get_object_or_404(
+            OrderPayment,
+            pk=payment_pk,
+            order=order,
+            provider="postfinance",
+        )
+
+        # Get the payment provider and execute void
+        provider = payment.payment_provider
+        success, error_message = provider.execute_void(payment)
+
+        if success:
+            messages.success(
+                request,
+                str(_("Payment voided successfully.")),
+            )
+            logger.info(
+                "Admin void successful for payment %s by user %s",
+                payment.pk,
+                request.user.pk if request.user else "anonymous",
+            )
+        else:
+            messages.error(
+                request,
+                error_message or str(_("Failed to void payment.")),
+            )
+            logger.warning(
+                "Admin void failed for payment %s: %s",
+                payment.pk,
+                error_message,
+            )
+
+        # Redirect back to the order page
+        return redirect(
+            "control:event.order",
+            organizer=request.event.organizer.slug,
+            event=request.event.slug,
+            code=order.code,
+        )
