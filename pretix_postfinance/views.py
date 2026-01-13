@@ -5,6 +5,8 @@ Handles return URLs from PostFinance payment page, webhook callbacks,
 and admin actions like capture.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from typing import Any, Dict, Optional
@@ -21,6 +23,7 @@ from pretix.base.models import Event, Order, OrderPayment
 from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.multidomain.urlreverse import eventreverse
 
+from ._types import PretixHttpRequest
 from .api import PostFinanceClient, PostFinanceError
 from .payment import FAILURE_STATES, SUCCESS_STATES
 
@@ -35,7 +38,7 @@ class PostFinanceReturnView(View):
     payment page after completing or cancelling payment.
     """
 
-    def get(self, request: HttpRequest, *args, **kwargs) -> HttpResponse:
+    def get(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
         """
         Process the return from PostFinance payment page.
 
@@ -927,7 +930,7 @@ class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
 
     permission = "can_change_orders"
 
-    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+    def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
         """
         Process the capture request.
 
@@ -997,7 +1000,7 @@ class PostFinanceVoidView(EventPermissionRequiredMixin, View):
 
     permission = "can_change_orders"
 
-    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+    def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
         """
         Process the void request.
 
@@ -1067,7 +1070,7 @@ class PostFinanceRefundView(EventPermissionRequiredMixin, View):
 
     permission = "can_change_orders"
 
-    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+    def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
         """
         Process the refund request.
 

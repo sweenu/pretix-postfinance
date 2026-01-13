@@ -1,20 +1,24 @@
+from __future__ import annotations
+
 import os
+from typing import Any
 
 from django.utils.translation import gettext_lazy as _
 
 # Allow running tests without pretix fully installed
 _TESTING = os.environ.get("PRETIX_POSTFINANCE_TESTING", "0") == "1"
 
+# Import PluginConfig or create stub for testing
 try:
-    from pretix.base.plugins import PluginConfig
+    from pretix.base.plugins import PluginConfig as _PluginConfigBase
 except ImportError:
     if not _TESTING:
         raise RuntimeError("Please use pretix 2024.1.0 or above to run this plugin!")
     # Create a stub for testing
-    PluginConfig = object  # type: ignore
+    _PluginConfigBase: Any = object  # type: ignore[no-redef]
 
 
-class PluginApp(PluginConfig):
+class PluginApp(_PluginConfigBase):
     name = "pretix_postfinance"
     verbose_name = _("PostFinance")
 

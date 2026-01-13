@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import logging
+import uuid
 from collections import OrderedDict
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from django import forms
 from django.contrib import messages
@@ -20,6 +23,9 @@ from pretix.base.payment import BasePaymentProvider
 from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .api import PostFinanceClient, PostFinanceError
+
+if TYPE_CHECKING:
+    from pretix.base.models import Order
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +71,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return str(custom_name)
         return str(_("PostFinance"))
 
-    def checkout_confirm_render(self, request, order=None) -> str:
+    def checkout_confirm_render(
+        self, request: HttpRequest, order: Optional[Order] = None
+    ) -> str:
         """
         Render the payment confirmation page content.
 
