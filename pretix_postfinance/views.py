@@ -881,7 +881,7 @@ class PostFinanceRefundView(EventPermissionRequiredMixin, View):
     Handle refund requests from the admin panel.
 
     This view is called when an administrator clicks the "Refund Payment"
-    button for a COMPLETED payment. It creates a full refund via
+    button for a COMPLETED payment. It creates a full or partial refund via
     the PostFinance API.
     """
 
@@ -891,12 +891,18 @@ class PostFinanceRefundView(EventPermissionRequiredMixin, View):
         """
         Process the refund request.
 
+        Supports both full and partial refunds. If an amount is provided in the
+        POST data, it will be used for a partial refund. Otherwise, the full
+        remaining refundable amount will be refunded.
+
         Args:
             request: The HTTP request.
 
         Returns:
             Redirect to the order page with success or error message.
         """
+        from decimal import Decimal, InvalidOperation
+
         order_code = kwargs.get("order")
         payment_pk = kwargs.get("payment")
 
@@ -912,18 +918,48 @@ class PostFinanceRefundView(EventPermissionRequiredMixin, View):
             provider="postfinance",
         )
 
+        # Parse refund amount from POST data (optional for partial refunds)
+        refund_amount: Optional[Decimal] = None
+        amount_str = request.POST.get("amount", "").strip()
+        if amount_str:
+            try:
+                refund_amount = Decimal(amount_str)
+            except InvalidOperation:
+                messages.error(
+                    request,
+                    str(_("Invalid refund amount.")),
+                )
+                return redirect(
+                    "control:event.order",
+                    organizer=request.event.organizer.slug,
+                    event=request.event.slug,
+                    code=order.code,
+                )
+
         # Get the payment provider and execute refund
         provider = payment.payment_provider
-        success, error_message = provider.execute_refund(payment)
+        success, error_message = provider.execute_refund(payment, amount=refund_amount)
 
         if success:
-            messages.success(
-                request,
-                str(_("Refund initiated successfully.")),
-            )
+            if refund_amount:
+                messages.success(
+                    request,
+                    str(
+                        _("Refund of {amount} {currency} initiated successfully.").format(
+                            amount=refund_amount,
+                            currency=request.event.currency,
+                        )
+                    ),
+                )
+            else:
+                messages.success(
+                    request,
+                    str(_("Refund initiated successfully.")),
+                )
             logger.info(
-                "Admin refund successful for payment %s by user %s",
+                "Admin refund successful for payment %s (amount=%s) by user %s",
                 payment.pk,
+                refund_amount or "full",
                 request.user.pk if request.user else "anonymous",
             )
         else:

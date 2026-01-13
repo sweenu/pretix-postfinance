@@ -603,61 +603,88 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 )
             )
 
-        # Show refund button for COMPLETED or FULFILL transactions (if not already refunded)
+        # Show refund section for COMPLETED or FULFILL transactions
         refundable_states = {
             TransactionState.COMPLETED.value,
             TransactionState.FULFILL.value,
         }
-        refund_id = info_data.get("refund_id")
-        if state in refundable_states and not refund_id:
-            refund_url = reverse(
-                "plugins:pretix_postfinance:postfinance.refund",
-                kwargs={
-                    "organizer": self.event.organizer.slug,
-                    "event": self.event.slug,
-                    "order": payment.order.code,
-                    "payment": payment.pk,
-                },
-            )
-            parts.append(
-                format_html(
-                    '<form action="{refund_url}" method="POST" style="margin-top: 10px;">'
-                    '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
-                    '<button type="submit" class="btn btn-warning btn-sm">'
-                    '{refund_text}'
-                    '</button>'
-                    '</form>',
-                    refund_url=refund_url,
-                    csrf=request.META.get("CSRF_COOKIE", ""),
-                    refund_text=_("Refund Payment"),
-                )
-            )
+        if state in refundable_states:
+            # Calculate remaining refundable amount
+            original_amount = payment.amount
+            total_refunded = Decimal(str(info_data.get("total_refunded_amount", 0)))
+            remaining_refundable = original_amount - total_refunded
 
-        # Show refund info if already refunded
-        if refund_id:
-            refund_state = info_data.get("refund_state")
-            refund_amount = info_data.get("refund_amount")
-            parts.append(
-                format_html(
-                    "<strong>{label}:</strong> {value}",
-                    label=_("Refund ID"),
-                    value=refund_id,
-                )
-            )
-            if refund_state:
+            # Show total refunded amount if any refunds have been made
+            if total_refunded > Decimal("0"):
                 parts.append(
                     format_html(
-                        "<strong>{label}:</strong> {value}",
-                        label=_("Refund State"),
-                        value=refund_state,
+                        "<strong>{label}:</strong> {value} {currency}",
+                        label=_("Total Refunded"),
+                        value=total_refunded,
+                        currency=payment.order.event.currency,
                     )
                 )
-            if refund_amount:
                 parts.append(
                     format_html(
-                        "<strong>{label}:</strong> {value}",
-                        label=_("Refund Amount"),
-                        value=refund_amount,
+                        "<strong>{label}:</strong> {value} {currency}",
+                        label=_("Remaining Refundable"),
+                        value=remaining_refundable,
+                        currency=payment.order.event.currency,
+                    )
+                )
+
+            # Show refund history if any
+            refund_history = info_data.get("refund_history", [])
+            if refund_history:
+                parts.append(format_html("<strong>{label}:</strong>", label=_("Refund History")))
+                for i, entry in enumerate(refund_history, 1):
+                    refund_id = entry.get("refund_id")
+                    refund_state = entry.get("refund_state", "")
+                    refund_amount = entry.get("refund_amount", 0)
+                    parts.append(
+                        format_html(
+                            "&nbsp;&nbsp;{num}. ID: {id}, Amount: {amount} {currency}, State: {state}",
+                            num=i,
+                            id=refund_id,
+                            amount=refund_amount,
+                            currency=payment.order.event.currency,
+                            state=refund_state,
+                        )
+                    )
+
+            # Show refund form if there's still refundable amount
+            if remaining_refundable > Decimal("0"):
+                refund_url = reverse(
+                    "plugins:pretix_postfinance:postfinance.refund",
+                    kwargs={
+                        "organizer": self.event.organizer.slug,
+                        "event": self.event.slug,
+                        "order": payment.order.code,
+                        "payment": payment.pk,
+                    },
+                )
+                parts.append(
+                    format_html(
+                        '<form action="{refund_url}" method="POST" style="margin-top: 10px;">'
+                        '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
+                        '<div style="margin-bottom: 5px;">'
+                        '<label for="refund_amount">{amount_label}:</label> '
+                        '<input type="number" name="amount" id="refund_amount" '
+                        'step="0.01" min="0.01" max="{max_amount}" '
+                        'placeholder="{max_amount}" '
+                        'style="width: 100px; margin-right: 5px;"> '
+                        '{currency}'
+                        '</div>'
+                        '<button type="submit" class="btn btn-warning btn-sm">'
+                        '{refund_text}'
+                        '</button>'
+                        '</form>',
+                        refund_url=refund_url,
+                        csrf=request.META.get("CSRF_COOKIE", ""),
+                        amount_label=_("Refund Amount"),
+                        max_amount=remaining_refundable,
+                        currency=payment.order.event.currency,
+                        refund_text=_("Refund Payment"),
                     )
                 )
 
@@ -834,16 +861,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return (False, str(_("Unexpected error: {error}").format(error=str(e))))
 
     def execute_refund(
-        self, payment: OrderPayment
+        self, payment: OrderPayment, amount: Optional[Decimal] = None
     ) -> Tuple[bool, Optional[str]]:
         """
-        Refund a completed transaction in full.
+        Refund a completed transaction.
 
-        This method is called from the refund view to create a full refund
-        for a transaction that is in the COMPLETED or FULFILL state.
+        This method is called from the refund view to create a full or partial
+        refund for a transaction that is in the COMPLETED or FULFILL state.
 
         Args:
             payment: The OrderPayment to refund.
+            amount: Optional refund amount. If not provided, refunds the
+                remaining refundable amount (full refund if no prior refunds).
 
         Returns:
             A tuple of (success: bool, error_message: Optional[str]).
@@ -874,11 +903,42 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 ),
             )
 
-        # Check if already refunded
-        if info_data.get("refund_id"):
+        # Calculate refundable amount
+        original_amount = payment.amount
+        total_refunded = Decimal(str(info_data.get("total_refunded_amount", 0)))
+        remaining_refundable = original_amount - total_refunded
+
+        if remaining_refundable <= Decimal("0"):
             return (
                 False,
-                str(_("Transaction has already been refunded.")),
+                str(_("Transaction has already been fully refunded.")),
+            )
+
+        # Determine refund amount
+        if amount is None:
+            refund_amount = remaining_refundable
+        else:
+            refund_amount = amount
+
+        # Validate refund amount
+        if refund_amount <= Decimal("0"):
+            return (
+                False,
+                str(_("Refund amount must be greater than zero.")),
+            )
+
+        if refund_amount > remaining_refundable:
+            return (
+                False,
+                str(
+                    _(
+                        "Refund amount ({refund_amount}) exceeds remaining "
+                        "refundable amount ({remaining})."
+                    ).format(
+                        refund_amount=refund_amount,
+                        remaining=remaining_refundable,
+                    )
+                ),
             )
 
         try:
@@ -892,21 +952,42 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 transaction_id=int(transaction_id),
                 external_id=external_id,
                 merchant_reference=merchant_reference,
+                amount=float(refund_amount),
             )
 
+            # Update total refunded amount
+            actual_refund_amount = float(refund.amount) if refund.amount else float(refund_amount)
+            new_total_refunded = float(total_refunded) + actual_refund_amount
+
+            # Build refund history entry
+            refund_entry = {
+                "refund_id": refund.id,
+                "refund_state": refund.state.value if refund.state else None,
+                "refund_amount": actual_refund_amount,
+            }
+
+            # Get or create refund history list
+            refund_history = info_data.get("refund_history", [])
+            refund_history.append(refund_entry)
+
             # Update payment info with refund details
+            info_data["refund_history"] = refund_history
+            info_data["total_refunded_amount"] = new_total_refunded
+            # Keep last refund info for backwards compatibility
             info_data["refund_id"] = refund.id
             info_data["refund_state"] = refund.state.value if refund.state else None
-            info_data["refund_amount"] = float(refund.amount) if refund.amount else None
+            info_data["refund_amount"] = actual_refund_amount
             payment.info_data = info_data
             payment.save(update_fields=["info"])
 
             logger.info(
                 "PostFinance refund %s created successfully for payment %s "
-                "(transaction %s)",
+                "(transaction %s, amount %s, total refunded %s)",
                 refund.id,
                 payment.pk,
                 transaction_id,
+                actual_refund_amount,
+                new_total_refunded,
             )
 
             return (True, None)

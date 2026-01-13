@@ -311,18 +311,21 @@ class PostFinanceClient:
         transaction_id: int,
         external_id: str,
         merchant_reference: Optional[str] = None,
+        amount: Optional[float] = None,
     ) -> Refund:
         """
-        Create a full refund for a completed transaction.
+        Create a refund for a completed transaction.
 
         This creates a refund for a transaction that is in the COMPLETED or
-        FULFILL state. The refund amount is the full transaction amount.
+        FULFILL state. If no amount is specified, a full refund is created.
 
         Args:
             transaction_id: The ID of the transaction to refund.
             external_id: A unique client-generated ID for this refund request.
                 Subsequent requests with the same ID will not execute again.
             merchant_reference: Optional merchant reference for the refund.
+            amount: Optional refund amount. If not provided, a full refund
+                is created. For partial refunds, specify the amount to refund.
 
         Returns:
             The Refund object with refund details.
@@ -336,6 +339,7 @@ class PostFinanceClient:
             externalId=external_id,
             type=RefundType.MERCHANT_INITIATED_ONLINE,
             merchantReference=merchant_reference,
+            amount=amount,
         )
 
         try:
