@@ -641,16 +641,32 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     refund_id = entry.get("refund_id")
                     refund_state = entry.get("refund_state", "")
                     refund_amount = entry.get("refund_amount", 0)
-                    parts.append(
-                        format_html(
-                            "&nbsp;&nbsp;{num}. ID: {id}, Amount: {amount} {currency}, State: {state}",
-                            num=i,
-                            id=refund_id,
-                            amount=refund_amount,
-                            currency=payment.order.event.currency,
-                            state=refund_state,
+                    refund_date = entry.get("refund_date", "")
+                    if refund_date:
+                        parts.append(
+                            format_html(
+                                "&nbsp;&nbsp;{num}. ID: {id}, Amount: {amount} {currency}, "
+                                "State: {state}, Date: {date}",
+                                num=i,
+                                id=refund_id,
+                                amount=refund_amount,
+                                currency=payment.order.event.currency,
+                                state=refund_state,
+                                date=refund_date,
+                            )
                         )
-                    )
+                    else:
+                        parts.append(
+                            format_html(
+                                "&nbsp;&nbsp;{num}. ID: {id}, Amount: {amount} {currency}, "
+                                "State: {state}",
+                                num=i,
+                                id=refund_id,
+                                amount=refund_amount,
+                                currency=payment.order.event.currency,
+                                state=refund_state,
+                            )
+                        )
 
             # Show refund form if there's still refundable amount
             if remaining_refundable > Decimal("0"):
@@ -964,6 +980,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 "refund_id": refund.id,
                 "refund_state": refund.state.value if refund.state else None,
                 "refund_amount": actual_refund_amount,
+                "refund_date": str(refund.created_on) if refund.created_on else None,
             }
 
             # Get or create refund history list

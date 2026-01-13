@@ -774,13 +774,15 @@ class PostFinanceWebhookView(View):
 
         refund_state = refund.state
         refund_amount = float(refund.amount) if refund.amount else None
+        refund_date = str(refund.created_on) if refund.created_on else None
 
         logger.info(
-            "PostFinance webhook: processing refund %s state=%s amount=%s "
+            "PostFinance webhook: processing refund %s state=%s amount=%s date=%s "
             "for payment %s",
             entity_id,
             refund_state,
             refund_amount,
+            refund_date,
             payment.pk,
         )
 
@@ -797,6 +799,8 @@ class PostFinanceWebhookView(View):
                 entry["refund_state"] = new_state
                 if refund_amount is not None:
                     entry["refund_amount"] = refund_amount
+                if refund_date and not entry.get("refund_date"):
+                    entry["refund_date"] = refund_date
                 updated = True
                 logger.info(
                     "PostFinance webhook: refund %s state updated from %s to %s "
@@ -815,6 +819,7 @@ class PostFinanceWebhookView(View):
                 "refund_id": entity_id,
                 "refund_state": refund_state.value if refund_state else None,
                 "refund_amount": refund_amount,
+                "refund_date": refund_date,
             }
             refund_history.append(new_entry)
             logger.info(
