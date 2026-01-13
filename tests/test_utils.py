@@ -2,8 +2,9 @@
 Tests for pretix_postfinance.utils module.
 """
 
-import pytest
 from decimal import Decimal
+
+import pytest
 
 from pretix_postfinance.utils import (
     CURRENCY_DECIMAL_PLACES,

@@ -2,8 +2,9 @@
 Tests for pretix_postfinance.api module.
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from pretix_postfinance.api import (
     PostFinanceClient,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from collections import OrderedDict
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -612,19 +611,21 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             parts.append(
                 format_html(
-                    '<form action="{capture_url}" method="POST" style="margin-top: 10px; display: inline-block;">'
+                    '<form action="{capture_url}" method="POST" '
+                    'style="margin-top: 10px; display: inline-block;">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
                     '<button type="submit" class="btn btn-primary btn-sm">'
-                    '{capture_text}'
-                    '</button>'
-                    '</form>'
-                    '&nbsp;'
-                    '<form action="{void_url}" method="POST" style="margin-top: 10px; display: inline-block;">'
+                    "{capture_text}"
+                    "</button>"
+                    "</form>"
+                    "&nbsp;"
+                    '<form action="{void_url}" method="POST" '
+                    'style="margin-top: 10px; display: inline-block;">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
                     '<button type="submit" class="btn btn-danger btn-sm">'
-                    '{void_text}'
-                    '</button>'
-                    '</form>',
+                    "{void_text}"
+                    "</button>"
+                    "</form>",
                     capture_url=capture_url,
                     void_url=void_url,
                     csrf=request.META.get("CSRF_COOKIE", ""),
