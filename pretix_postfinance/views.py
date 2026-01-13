@@ -377,7 +377,7 @@ class PostFinanceWebhookView(View):
             state,
         )
 
-        # Process the transaction state update
+        # Try to process as transaction webhook first
         result = self._process_transaction_state(
             entity_id=entity_id,
             space_id=space_id,
@@ -385,8 +385,20 @@ class PostFinanceWebhookView(View):
         )
 
         if result is None:
+            # No payment found by transaction_id, try processing as refund webhook
+            result = self._process_refund_state(
+                entity_id=entity_id,
+                space_id=space_id,
+                state=state,
+            )
+
+        if result is None:
             # Could not find or process payment - return 200 to prevent retries
             # (webhook is valid but payment may not exist yet or listener type unknown)
+            logger.debug(
+                "PostFinance webhook: no matching payment found for entityId=%s",
+                entity_id,
+            )
             return HttpResponse(status=200)
 
         return HttpResponse(status=200)
@@ -703,6 +715,169 @@ class PostFinanceWebhookView(View):
             payment.state,
         )
         return False
+
+    def _process_refund_state(
+        self,
+        entity_id: Optional[int],
+        space_id: int,
+        state: Optional[str],
+    ) -> Optional[bool]:
+        """
+        Process refund state update from webhook.
+
+        Finds the payment that has a refund with the given refund ID in its
+        refund_history, fetches the current refund state from PostFinance,
+        and updates the payment info accordingly.
+
+        Args:
+            entity_id: The PostFinance refund ID (entityId from webhook).
+            space_id: The PostFinance space ID.
+            state: The refund state from the webhook (may be None).
+
+        Returns:
+            True if the refund status was updated, False if already processed,
+            None if payment/refund not found or could not be processed.
+        """
+        if not entity_id:
+            return None
+
+        # Find payment by refund ID in refund_history
+        payment = self._find_payment_by_refund_id(entity_id)
+        if not payment:
+            logger.debug(
+                "PostFinance webhook: no payment found with refund ID %s",
+                entity_id,
+            )
+            return None
+
+        # Get client for this space
+        client = self._get_client_for_space(space_id)
+        if not client:
+            logger.error(
+                "PostFinance webhook: could not get client for spaceId=%s "
+                "while processing refund %s",
+                space_id,
+                entity_id,
+            )
+            return None
+
+        # Fetch full refund details from PostFinance
+        try:
+            refund = client.get_refund(int(entity_id))
+        except PostFinanceError as e:
+            logger.error(
+                "PostFinance webhook: failed to fetch refund %s: %s",
+                entity_id,
+                e,
+            )
+            return None
+
+        refund_state = refund.state
+        refund_amount = float(refund.amount) if refund.amount else None
+
+        logger.info(
+            "PostFinance webhook: processing refund %s state=%s amount=%s "
+            "for payment %s",
+            entity_id,
+            refund_state,
+            refund_amount,
+            payment.pk,
+        )
+
+        # Update refund entry in payment info
+        info_data = payment.info_data or {}
+        refund_history = info_data.get("refund_history", [])
+
+        # Find and update the matching refund entry
+        updated = False
+        for entry in refund_history:
+            if entry.get("refund_id") == entity_id:
+                old_state = entry.get("refund_state")
+                new_state = refund_state.value if refund_state else None
+                entry["refund_state"] = new_state
+                if refund_amount is not None:
+                    entry["refund_amount"] = refund_amount
+                updated = True
+                logger.info(
+                    "PostFinance webhook: refund %s state updated from %s to %s "
+                    "for payment %s",
+                    entity_id,
+                    old_state,
+                    new_state,
+                    payment.pk,
+                )
+                break
+
+        if not updated:
+            # Refund ID not in history - might be a new refund created externally
+            # Add it to the history
+            new_entry = {
+                "refund_id": entity_id,
+                "refund_state": refund_state.value if refund_state else None,
+                "refund_amount": refund_amount,
+            }
+            refund_history.append(new_entry)
+            logger.info(
+                "PostFinance webhook: added new refund %s to history for payment %s "
+                "(state=%s, amount=%s)",
+                entity_id,
+                payment.pk,
+                refund_state,
+                refund_amount,
+            )
+
+            # Update total refunded amount if this is a successful refund
+            if refund_state and refund_state.value == "SUCCESSFUL" and refund_amount:
+                total_refunded = float(info_data.get("total_refunded_amount", 0))
+                info_data["total_refunded_amount"] = total_refunded + refund_amount
+
+        # Save updated info
+        info_data["refund_history"] = refund_history
+        # Also update the last refund fields for backwards compatibility
+        info_data["refund_id"] = entity_id
+        info_data["refund_state"] = refund_state.value if refund_state else None
+        payment.info_data = info_data
+        payment.save(update_fields=["info"])
+
+        return True
+
+    def _find_payment_by_refund_id(
+        self,
+        refund_id: int,
+    ) -> Optional[OrderPayment]:
+        """
+        Find a payment record by PostFinance refund ID.
+
+        Searches for payments that have the given refund ID in their
+        refund_history stored in info_data.
+
+        Args:
+            refund_id: The PostFinance refund ID.
+
+        Returns:
+            The OrderPayment if found, None otherwise.
+        """
+        # Search for payment with this refund ID in info_data
+        # info_data is stored as JSON in the 'info' field
+        payments = OrderPayment.objects.filter(
+            provider="postfinance",
+            info__icontains=str(refund_id),
+        )
+
+        for payment in payments:
+            info_data = payment.info_data or {}
+
+            # Check refund_history list
+            refund_history = info_data.get("refund_history", [])
+            for entry in refund_history:
+                if str(entry.get("refund_id")) == str(refund_id):
+                    return payment
+
+            # Also check legacy refund_id field
+            if str(info_data.get("refund_id")) == str(refund_id):
+                return payment
+
+        return None
 
     def _parse_payload(self, request: HttpRequest) -> Dict[str, Any]:
         """

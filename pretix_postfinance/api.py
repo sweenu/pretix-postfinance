@@ -358,6 +358,35 @@ class PostFinanceClient:
             logger.error("PostFinance SDK error creating refund: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
+    def get_refund(self, refund_id: int) -> Refund:
+        """
+        Retrieve a refund by its ID.
+
+        Args:
+            refund_id: The ID of the refund.
+
+        Returns:
+            The Refund object with refund details.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        try:
+            return self._refunds_service.get_payment_refunds_id(
+                id=refund_id,
+                space=self.space_id,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error getting refund: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting refund: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
     def is_webhook_signature_valid(
         self,
         signature_header: str,
