@@ -40,4 +40,12 @@ urlpatterns = [
         views.PostFinanceVoidView.as_view(),
         name="postfinance.void",
     ),
+    # Control panel refund view (admin-only)
+    # URL: /control/event/<organizer>/<event>/postfinance/refund/<order>/<payment>/
+    re_path(
+        r"^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/postfinance/refund/"
+        r"(?P<order>[^/]+)/(?P<payment>\d+)/$",
+        views.PostFinanceRefundView.as_view(),
+        name="postfinance.refund",
+    ),
 ]

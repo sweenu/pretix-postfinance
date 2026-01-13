@@ -13,6 +13,9 @@ from postfinancecheckout.exceptions import ApiException
 from postfinancecheckout.models import (
     LineItemCreate,
     LineItemType,
+    Refund,
+    RefundCreate,
+    RefundType,
     Space,
     Transaction,
     TransactionCompletion,
@@ -24,6 +27,7 @@ from postfinancecheckout.postfinancecheckout_sdk_exception import (
     PostFinanceCheckoutSdkException,
 )
 from postfinancecheckout.service import (
+    RefundsService,
     SpacesService,
     TransactionsService,
     WebhookEncryptionKeysService,
@@ -94,6 +98,7 @@ class PostFinanceClient:
         )
         self._spaces_service = SpacesService(self._configuration)
         self._transactions_service = TransactionsService(self._configuration)
+        self._refunds_service = RefundsService(self._configuration)
         self._webhook_encryption_service = WebhookEncryptionKeysService(self._configuration)
 
     def get_space(self) -> Space:
@@ -299,6 +304,54 @@ class PostFinanceClient:
             ) from e
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error voiding transaction: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def refund_transaction(
+        self,
+        transaction_id: int,
+        external_id: str,
+        merchant_reference: Optional[str] = None,
+    ) -> Refund:
+        """
+        Create a full refund for a completed transaction.
+
+        This creates a refund for a transaction that is in the COMPLETED or
+        FULFILL state. The refund amount is the full transaction amount.
+
+        Args:
+            transaction_id: The ID of the transaction to refund.
+            external_id: A unique client-generated ID for this refund request.
+                Subsequent requests with the same ID will not execute again.
+            merchant_reference: Optional merchant reference for the refund.
+
+        Returns:
+            The Refund object with refund details.
+
+        Raises:
+            PostFinanceError: If the request fails (e.g., transaction not
+                in a refundable state, already fully refunded, etc.).
+        """
+        refund_create = RefundCreate(
+            transaction=transaction_id,
+            externalId=external_id,
+            type=RefundType.MERCHANT_INITIATED_ONLINE,
+            merchantReference=merchant_reference,
+        )
+
+        try:
+            return self._refunds_service.post_payment_refunds(
+                space=self.space_id,
+                refund_create=refund_create,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error creating refund: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error creating refund: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
     def is_webhook_signature_valid(

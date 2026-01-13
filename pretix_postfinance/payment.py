@@ -603,6 +603,64 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 )
             )
 
+        # Show refund button for COMPLETED or FULFILL transactions (if not already refunded)
+        refundable_states = {
+            TransactionState.COMPLETED.value,
+            TransactionState.FULFILL.value,
+        }
+        refund_id = info_data.get("refund_id")
+        if state in refundable_states and not refund_id:
+            refund_url = reverse(
+                "plugins:pretix_postfinance:postfinance.refund",
+                kwargs={
+                    "organizer": self.event.organizer.slug,
+                    "event": self.event.slug,
+                    "order": payment.order.code,
+                    "payment": payment.pk,
+                },
+            )
+            parts.append(
+                format_html(
+                    '<form action="{refund_url}" method="POST" style="margin-top: 10px;">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
+                    '<button type="submit" class="btn btn-warning btn-sm">'
+                    '{refund_text}'
+                    '</button>'
+                    '</form>',
+                    refund_url=refund_url,
+                    csrf=request.META.get("CSRF_COOKIE", ""),
+                    refund_text=_("Refund Payment"),
+                )
+            )
+
+        # Show refund info if already refunded
+        if refund_id:
+            refund_state = info_data.get("refund_state")
+            refund_amount = info_data.get("refund_amount")
+            parts.append(
+                format_html(
+                    "<strong>{label}:</strong> {value}",
+                    label=_("Refund ID"),
+                    value=refund_id,
+                )
+            )
+            if refund_state:
+                parts.append(
+                    format_html(
+                        "<strong>{label}:</strong> {value}",
+                        label=_("Refund State"),
+                        value=refund_state,
+                    )
+                )
+            if refund_amount:
+                parts.append(
+                    format_html(
+                        "<strong>{label}:</strong> {value}",
+                        label=_("Refund Amount"),
+                        value=refund_amount,
+                    )
+                )
+
         if parts:
             return "<br>".join(parts)
         return ""
@@ -770,6 +828,99 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         except Exception as e:
             logger.exception(
                 "Unexpected error voiding transaction %s: %s",
+                transaction_id,
+                e,
+            )
+            return (False, str(_("Unexpected error: {error}").format(error=str(e))))
+
+    def execute_refund(
+        self, payment: OrderPayment
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Refund a completed transaction in full.
+
+        This method is called from the refund view to create a full refund
+        for a transaction that is in the COMPLETED or FULFILL state.
+
+        Args:
+            payment: The OrderPayment to refund.
+
+        Returns:
+            A tuple of (success: bool, error_message: Optional[str]).
+            On success, error_message is None.
+            On failure, error_message contains the error description.
+        """
+        import uuid
+
+        info_data = payment.info_data or {}
+        transaction_id = info_data.get("transaction_id")
+
+        if not transaction_id:
+            return (False, str(_("Transaction ID not found.")))
+
+        # Check if transaction is in a refundable state (COMPLETED or FULFILL)
+        current_state = info_data.get("state")
+        refundable_states = {
+            TransactionState.COMPLETED.value,
+            TransactionState.FULFILL.value,
+        }
+        if current_state not in refundable_states:
+            return (
+                False,
+                str(
+                    _("Transaction cannot be refunded. Current state: {state}").format(
+                        state=current_state or "Unknown"
+                    )
+                ),
+            )
+
+        # Check if already refunded
+        if info_data.get("refund_id"):
+            return (
+                False,
+                str(_("Transaction has already been refunded.")),
+            )
+
+        try:
+            client = self._get_client()
+
+            # Generate a unique external ID for idempotency
+            external_id = f"pretix-refund-{payment.pk}-{uuid.uuid4().hex[:8]}"
+            merchant_reference = f"pretix-{self.event.slug}-{payment.order.code}"
+
+            refund = client.refund_transaction(
+                transaction_id=int(transaction_id),
+                external_id=external_id,
+                merchant_reference=merchant_reference,
+            )
+
+            # Update payment info with refund details
+            info_data["refund_id"] = refund.id
+            info_data["refund_state"] = refund.state.value if refund.state else None
+            info_data["refund_amount"] = float(refund.amount) if refund.amount else None
+            payment.info_data = info_data
+            payment.save(update_fields=["info"])
+
+            logger.info(
+                "PostFinance refund %s created successfully for payment %s "
+                "(transaction %s)",
+                refund.id,
+                payment.pk,
+                transaction_id,
+            )
+
+            return (True, None)
+
+        except PostFinanceError as e:
+            logger.exception(
+                "PostFinance API error refunding transaction %s: %s",
+                transaction_id,
+                e,
+            )
+            return (False, str(_("Refund failed: {error}").format(error=str(e))))
+        except Exception as e:
+            logger.exception(
+                "Unexpected error refunding transaction %s: %s",
                 transaction_id,
                 e,
             )
