@@ -41,6 +41,7 @@ dev = [
     "mypy>=1.0",
     "django-stubs>=4.0",
     "ruff>=0.1",
+    "commitizen>=4.9.1",
 ]
 
 [project.urls]
@@ -108,3 +109,16 @@ exclude_lines = [
     "if TYPE_CHECKING:",
 ]
 show_missing = true
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version_provider = "uv"
+version_files = [
+    "pretix_postfinance/__init__.py:version",
+    "flake.nix:version"
+]
+tag_format = "v$version"
+update_changelog_on_bump = false
+annotated_tag = true
+gpg_sign = true
+bump_message = "Release: $new_version"
