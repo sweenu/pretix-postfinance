@@ -4,13 +4,41 @@ PostFinance Checkout payment plugin for pretix.
 
 ## Installation
 
+### PyPI
+
 ```bash
 pip install pretix-postfinance
 ```
 
+### NixOS
+
+For NixOS users, the plugin can be installed using the flake:
+
+```nix
+{
+  inputs.pretix-postfinance.url = "github:sweenu/pretix-postfinance";
+
+  outputs = { self, nixpkgs, pretix-postfinance }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        {
+          services.pretix = {
+            enable = true;
+            plugins = [
+              pretix-postfinance.packages.x86_64-linux.default
+            ];
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
 ## Development
 
-### Setup
+### Setup with uv
 
 ```bash
 # Create virtual environment
@@ -18,6 +46,16 @@ uv venv
 
 # Install with development dependencies
 uv pip install -e ".[dev]"
+```
+
+### Setup with Nix
+
+```bash
+# Enter development shell
+nix develop
+
+# Or use direnv (if you have a .envrc configured)
+direnv allow
 ```
 
 ### Running checks
