@@ -7,8 +7,24 @@ name = "pretix-postfinance"
 version = "1.0.0"
 description = "PostFinance Checkout payment plugin for pretix"
 readme = "README.md"
-license = "AGPLv3"
+license = {text = "AGPLv3"}
 requires-python = ">=3.9"
+authors = [
+    {name = "Sweenu", email = "contact@sweenu.xyz"}
+]
+keywords = ["pretix", "payment", "postfinance", "checkout"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Django",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "pretix>=2024.1.0",
     "postfinancecheckout>=6.0.0",
@@ -23,6 +39,16 @@ dev = [
     "django-stubs>=4.0",
     "ruff>=0.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/sweenu/pretix-postfinance"
+Repository = "https://github.com/sweenu/pretix-postfinance"
+
+[project.entry-points."pretix.plugin"]
+pretix_postfinance = "pretix_postfinance:PretixPluginMeta"
+
+[tool.setuptools]
+packages = ["pretix_postfinance"]
 
 [tool.mypy]
 python_version = "3.9"
