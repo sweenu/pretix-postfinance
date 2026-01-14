@@ -41,15 +41,14 @@ All commands match the GitHub workflow exactly:
 uv run ruff check .
 
 # Type check
-PRETIX_POSTFINANCE_TESTING=1 uv run mypy pretix_postfinance/
+uv run mypy pretix_postfinance/
 
 # Test
-PRETIX_POSTFINANCE_TESTING=1 uv run pytest tests/ --cov=pretix_postfinance --cov-report=term-missing -v
+uv run pytest tests/ --cov=pretix_postfinance --cov-report=term-missing -v
 ```
 
 ## Important Conventions
 
-1. **Testing Mode**: Set `PRETIX_POSTFINANCE_TESTING=1` to run without pretix installed
 2. **Type Hints**: Strict mypy with django-stubs, use `PretixHttpRequest` for views
 3. **Payment Info Storage**: Use `payment.info_data` dict for transaction/refund metadata
 4. **Error Handling**: Store `error_code` and `error_status_code` in info_data

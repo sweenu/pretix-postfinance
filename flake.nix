@@ -56,8 +56,8 @@
             echo ""
             echo "Available commands:"
             echo "  uv run ruff check ."
-            echo "  PRETIX_POSTFINANCE_TESTING=1 uv run mypy pretix_postfinance/"
-            echo "  PRETIX_POSTFINANCE_TESTING=1 uv run pytest tests/"
+            echo "  uv run mypy pretix_postfinance/"
+            echo "  uv run pytest tests/"
           '';
         };
       }
