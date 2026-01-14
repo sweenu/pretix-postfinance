@@ -919,6 +919,43 @@ class PostFinanceWebhookView(View):
         return payload
 
 
+class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):
+    """
+    AJAX endpoint for testing PostFinance API connection.
+
+    This view is called when an administrator clicks the "Test Connection"
+    button in the payment provider settings. It validates the configured
+    credentials by attempting to fetch the space details from PostFinance.
+    """
+
+    permission = "can_change_event_settings"
+
+    def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        """
+        Test the PostFinance API connection.
+
+        Returns:
+            JSON response with success status and message.
+        """
+        # Get the PostFinance payment provider for this event
+        providers = request.event.get_payment_providers()
+        provider = providers.get("postfinance")
+
+        if not provider:
+            return JsonResponse({
+                "success": False,
+                "message": str(_("PostFinance payment provider not found.")),
+            })
+
+        # Test the connection
+        success, message = provider.test_connection()
+
+        return JsonResponse({
+            "success": success,
+            "message": message,
+        })
+
+
 class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
     """
     Handle manual capture requests from the admin panel.

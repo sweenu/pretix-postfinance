@@ -45,6 +45,20 @@ FAILURE_STATES = {
     TransactionState.VOIDED,
 }
 
+# Mapping of HTTP status codes to user-friendly error messages
+ERROR_STATUS_MESSAGES = {
+    400: _("Bad request. The payment data may be invalid."),
+    401: _("Authentication failed. Check your User ID and API Secret in settings."),
+    403: _("Access denied. Your API credentials may lack required permissions."),
+    404: _("Resource not found. The transaction or space ID may be invalid."),
+    409: _("Conflict. The transaction may have already been processed."),
+    422: _("Invalid request. Check the payment amount and currency."),
+    429: _("Rate limited. Too many requests to PostFinance API."),
+    500: _("PostFinance server error. Please try again later."),
+    502: _("PostFinance gateway error. Please try again later."),
+    503: _("PostFinance service unavailable. Please try again later."),
+}
+
 
 class PostFinancePaymentProvider(BasePaymentProvider):
     """
@@ -201,6 +215,81 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             ]
         )
         return d
+
+    def settings_content_render(self, request: HttpRequest) -> str:
+        """
+        Render additional content below the settings form.
+
+        Adds a "Test Connection" button that validates the configured
+        PostFinance credentials via AJAX.
+
+        Args:
+            request: The HTTP request object.
+
+        Returns:
+            HTML string with the test connection button and JavaScript.
+        """
+        test_url = reverse(
+            "plugins:pretix_postfinance:postfinance.test_connection",
+            kwargs={
+                "organizer": self.event.organizer.slug,
+                "event": self.event.slug,
+            },
+        )
+
+        return format_html(
+            """
+            <div class="form-group">
+                <label class="col-md-3 control-label">{label}</label>
+                <div class="col-md-9">
+                    <button type="button" class="btn btn-default" id="postfinance-test-connection">
+                        {button_text}
+                    </button>
+                    <span id="postfinance-test-result" style="margin-left: 10px;"></span>
+                </div>
+            </div>
+            <script>
+            (function() {{
+                var btn = document.getElementById('postfinance-test-connection');
+                var result = document.getElementById('postfinance-test-result');
+                btn.addEventListener('click', function() {{
+                    btn.disabled = true;
+                    btn.textContent = '{testing_text}';
+                    result.textContent = '';
+                    result.className = '';
+
+                    fetch('{test_url}', {{
+                        method: 'POST',
+                        headers: {{
+                            'X-CSRFToken': '{csrf_token}',
+                            'Content-Type': 'application/json'
+                        }},
+                        credentials: 'same-origin'
+                    }})
+                    .then(function(response) {{ return response.json(); }})
+                    .then(function(data) {{
+                        btn.disabled = false;
+                        btn.textContent = '{button_text}';
+                        result.textContent = data.message;
+                        result.style.color = data.success ? 'green' : 'red';
+                    }})
+                    .catch(function(error) {{
+                        btn.disabled = false;
+                        btn.textContent = '{button_text}';
+                        result.textContent = '{error_text}';
+                        result.style.color = 'red';
+                    }});
+                }});
+            }})();
+            </script>
+            """,
+            label=_("Connection Test"),
+            button_text=_("Test Connection"),
+            testing_text=_("Testing..."),
+            test_url=test_url,
+            csrf_token=request.META.get("CSRF_COOKIE", ""),
+            error_text=_("Connection test failed. Please try again."),
+        )
 
     def _get_client(self) -> PostFinanceClient:
         """
@@ -544,13 +633,34 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         parts: list[str] = []
 
         if transaction_id:
-            parts.append(
-                format_html(
-                    "<strong>{label}:</strong> {value}",
-                    label=_("Transaction ID"),
-                    value=transaction_id,
+            # Build link to PostFinance dashboard
+            space_id = self.settings.get("space_id")
+            environment = self.settings.get("environment", "sandbox")
+            if space_id:
+                if environment == "production":
+                    dashboard_base = "https://checkout.postfinance.ch"
+                else:
+                    dashboard_base = "https://checkout.sandbox.postfinance.ch"
+                dashboard_url = (
+                    f"{dashboard_base}/s/{space_id}/payment/transaction/view/{transaction_id}"
                 )
-            )
+                parts.append(
+                    format_html(
+                        '<strong>{label}:</strong> <a href="{url}" target="_blank" '
+                        'rel="noopener noreferrer">{value}</a>',
+                        label=_("Transaction ID"),
+                        url=dashboard_url,
+                        value=transaction_id,
+                    )
+                )
+            else:
+                parts.append(
+                    format_html(
+                        "<strong>{label}:</strong> {value}",
+                        label=_("Transaction ID"),
+                        value=transaction_id,
+                    )
+                )
 
         if state:
             parts.append(
@@ -575,11 +685,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         if error_message:
             error_code = info_data.get("error_code")
             error_status = info_data.get("error_status_code")
+
+            # Build error display with actionable suggestion if available
             error_parts = [str(error_message)]
             if error_code:
                 error_parts.append(f"Code: {error_code}")
             if error_status:
                 error_parts.append(f"HTTP {error_status}")
+
             parts.append(
                 format_html(
                     '<strong style="color: #c00;">{label}:</strong> '
@@ -588,6 +701,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     value=" | ".join(error_parts),
                 )
             )
+
+            # Add actionable suggestion based on HTTP status code
+            if error_status and int(error_status) in ERROR_STATUS_MESSAGES:
+                suggestion = ERROR_STATUS_MESSAGES[int(error_status)]
+                parts.append(
+                    format_html(
+                        '<span style="color: #666; font-style: italic;">{suggestion}</span>',
+                        suggestion=suggestion,
+                    )
+                )
 
         # Show capture and void buttons for AUTHORIZED transactions
         if state == TransactionState.AUTHORIZED.value:

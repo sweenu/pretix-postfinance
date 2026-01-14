@@ -24,6 +24,13 @@ urlpatterns = [
         views.PostFinanceWebhookView.as_view(),
         name="postfinance.webhook",
     ),
+    # Control panel test connection view (admin-only)
+    # URL: /control/event/<organizer>/<event>/postfinance/test-connection/
+    re_path(
+        r"^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/postfinance/test-connection/$",
+        views.PostFinanceTestConnectionView.as_view(),
+        name="postfinance.test_connection",
+    ),
     # Control panel capture view (admin-only)
     # URL: /control/event/<organizer>/<event>/postfinance/capture/<order>/<payment>/
     re_path(
