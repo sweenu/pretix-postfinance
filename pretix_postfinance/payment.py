@@ -395,25 +395,81 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Build PostFinance line items from pretix cart.
 
+        Creates detailed line items for each cart position and fee, providing
+        itemized receipts on the PostFinance payment page.
+
         Args:
-            cart: The pretix cart dictionary with 'total' and 'positions'.
+            cart: The pretix cart dictionary with 'positions', 'fees', and 'total'.
             currency: The currency code.
 
         Returns:
             List of LineItemCreate objects for PostFinance API.
         """
         line_items: list[LineItemCreate] = []
-        total = cart.get("total", Decimal("0"))
 
-        line_items.append(
-            LineItemCreate(
-                name=str(_("Order Total")),
-                quantity=1,
-                amountIncludingTax=float(total),
-                type=LineItemType.PRODUCT,
-                uniqueId="order-total",
+        # Add individual items from grouped positions
+        positions = cart.get("positions", [])
+        for idx, position in enumerate(positions):
+            # Get item name, including variation if applicable
+            item_name = str(position.item.name)
+            if hasattr(position, "variation") and position.variation:
+                item_name = f"{item_name} - {position.variation.value}"
+
+            # Get quantity (grouped positions have a count attribute)
+            quantity = getattr(position, "count", 1)
+
+            # Get the total price for this position (includes quantity)
+            price = getattr(position, "total", getattr(position, "price", Decimal("0")))
+
+            line_items.append(
+                LineItemCreate(
+                    name=item_name,
+                    quantity=float(quantity),
+                    amountIncludingTax=float(price),
+                    type=LineItemType.PRODUCT,
+                    uniqueId=f"position-{idx}-{position.item.pk}",
+                )
             )
-        )
+
+        # Add fees (surcharges, taxes, etc.)
+        fees = cart.get("fees", [])
+        for idx, fee in enumerate(fees):
+            fee_value = getattr(fee, "value", Decimal("0"))
+            if fee_value == Decimal("0"):
+                continue
+
+            # Get fee description
+            fee_name = str(_("Fee"))
+            if hasattr(fee, "get_fee_type_display"):
+                fee_name = str(fee.get_fee_type_display())
+            elif hasattr(fee, "fee_type"):
+                fee_name = str(fee.fee_type)
+
+            # Determine line item type based on fee
+            line_type = LineItemType.FEE
+
+            line_items.append(
+                LineItemCreate(
+                    name=fee_name,
+                    quantity=1,
+                    amountIncludingTax=float(fee_value),
+                    type=line_type,
+                    uniqueId=f"fee-{idx}",
+                )
+            )
+
+        # Fallback: if no positions were found, use total as single line item
+        if not line_items:
+            total = cart.get("total", Decimal("0"))
+            line_items.append(
+                LineItemCreate(
+                    name=str(_("Order Total")),
+                    quantity=1,
+                    amountIncludingTax=float(total),
+                    type=LineItemType.PRODUCT,
+                    uniqueId="order-total",
+                )
+            )
 
         return line_items
 
@@ -1171,10 +1227,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # Update payment info with refund details
             info_data["refund_history"] = refund_history
             info_data["total_refunded_amount"] = new_total_refunded
-            # Keep last refund info for backwards compatibility
-            info_data["refund_id"] = refund.id
-            info_data["refund_state"] = refund.state.value if refund.state else None
-            info_data["refund_amount"] = actual_refund_amount
             payment.info_data = info_data
             payment.save(update_fields=["info"])
 

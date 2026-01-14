@@ -841,9 +841,6 @@ class PostFinanceWebhookView(View):
 
         # Save updated info
         info_data["refund_history"] = refund_history
-        # Also update the last refund fields for backwards compatibility
-        info_data["refund_id"] = entity_id
-        info_data["refund_state"] = refund_state.value if refund_state else None
         payment.info_data = info_data
         payment.save(update_fields=["info"])
 
