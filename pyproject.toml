@@ -88,8 +88,30 @@ line-length = 100
 target-version = "py39"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
-ignore = []
+select = [
+    "E",      # pycodestyle errors
+    "F",      # Pyflakes (unused imports, variables, etc.)
+    "I",      # isort
+    "W",      # pycodestyle warnings
+    "ARG",    # flake8-unused-arguments
+    "B",      # flake8-bugbear (common bugs)
+    "C4",     # flake8-comprehensions
+    "PIE",    # flake8-pie (misc lints)
+    "RUF",    # Ruff-specific rules
+    "SIM",    # flake8-simplify
+    "UP",     # pyupgrade
+]
+ignore = [
+    "RUF005",  # Consider iterable unpacking - common pattern in pretix plugins
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Plugin code overrides base class methods, so unused args are expected
+"pretix_postfinance/*.py" = ["ARG002"]
+# Django signals require sender and kwargs arguments
+"pretix_postfinance/signals.py" = ["ARG001"]
+# conftest.py needs imports after django.setup()
+"tests/conftest.py" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

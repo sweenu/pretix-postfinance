@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any
 
 from django import forms
 from django.contrib import messages
@@ -71,7 +71,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         return str(_("PostFinance"))
 
     def checkout_confirm_render(
-        self, request: HttpRequest, order: Optional[Order] = None
+        self, request: HttpRequest, order: Order | None = None
     ) -> str:
         """
         Render the payment confirmation page content.
@@ -93,7 +93,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         )
 
     @property
-    def settings_form_fields(self) -> "OrderedDict[str, forms.Field]":
+    def settings_form_fields(self) -> OrderedDict[str, forms.Field]:
         """
         Return the form fields for the payment provider settings.
 
@@ -216,7 +216,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             environment=self.settings.get("environment", "sandbox"),
         )
 
-    def test_connection(self) -> Tuple[bool, str]:
+    def test_connection(self) -> tuple[bool, str]:
         """
         Test the connection to PostFinance API using configured credentials.
 
@@ -288,8 +288,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         return request.session.get("payment_postfinance_transaction_id") is not None
 
     def _build_line_items(
-        self, cart: Dict[str, Any], currency: str
-    ) -> List[LineItemCreate]:
+        self, cart: dict[str, Any], currency: str
+    ) -> list[LineItemCreate]:
         """
         Build PostFinance line items from pretix cart.
 
@@ -300,7 +300,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Returns:
             List of LineItemCreate objects for PostFinance API.
         """
-        line_items: List[LineItemCreate] = []
+        line_items: list[LineItemCreate] = []
         total = cart.get("total", Decimal("0"))
 
         line_items.append(
@@ -316,8 +316,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         return line_items
 
     def checkout_prepare(
-        self, request: HttpRequest, cart: Dict[str, Any]
-    ) -> Union[bool, str]:
+        self, request: HttpRequest, cart: dict[str, Any]
+    ) -> bool | str:
         """
         Prepare the checkout for payment.
 
@@ -413,7 +413,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def execute_payment(
         self, request: HttpRequest, payment: OrderPayment
-    ) -> Union[str, None]:
+    ) -> str | None:
         """
         Execute the payment after the order is confirmed.
 
@@ -541,7 +541,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         state = info_data.get("state")
         payment_method = info_data.get("payment_method")
 
-        parts: List[str] = []
+        parts: list[str] = []
 
         if transaction_id:
             parts.append(
@@ -741,7 +741,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def execute_capture(
         self, payment: OrderPayment
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """
         Capture (complete) an authorized transaction.
 
@@ -826,7 +826,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def execute_void(
         self, payment: OrderPayment
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """
         Void an authorized transaction.
 
@@ -908,8 +908,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return (False, str(_("Unexpected error: {error}").format(error=str(e))))
 
     def execute_refund(
-        self, payment: OrderPayment, amount: Optional[Decimal] = None
-    ) -> Tuple[bool, Optional[str]]:
+        self, payment: OrderPayment, amount: Decimal | None = None
+    ) -> tuple[bool, str | None]:
         """
         Refund a completed transaction.
 
@@ -962,10 +962,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
 
         # Determine refund amount
-        if amount is None:
-            refund_amount = remaining_refundable
-        else:
-            refund_amount = amount
+        refund_amount = remaining_refundable if amount is None else amount
 
         # Validate refund amount
         if refund_amount <= Decimal("0"):

@@ -13,7 +13,9 @@ try:
     from pretix.base.plugins import PluginConfig as _PluginConfigBase
 except ImportError:
     if not _TESTING:
-        raise RuntimeError("Please use pretix 2024.1.0 or above to run this plugin!")
+        raise RuntimeError(
+            "Please use pretix 2024.1.0 or above to run this plugin!"
+        ) from None
     # Create a stub for testing
     _PluginConfigBase: Any = object  # type: ignore[no-redef]
 

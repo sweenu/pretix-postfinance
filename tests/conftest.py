@@ -12,14 +12,14 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.settings")
 # Add tests directory to path for settings import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import django  # noqa: E402
+import django
 
 django.setup()
 
-from decimal import Decimal  # noqa: E402
-from unittest.mock import MagicMock  # noqa: E402
+from decimal import Decimal
+from unittest.mock import MagicMock
 
-import pytest  # noqa: E402
+import pytest
 
 
 @pytest.fixture

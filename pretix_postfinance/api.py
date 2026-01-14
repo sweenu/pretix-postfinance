@@ -5,14 +5,15 @@ Provides a wrapper around the official PostFinance Checkout Python SDK
 for use with the pretix payment plugin.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import List, Literal, Optional
+from typing import Literal
 
 from postfinancecheckout import Configuration
 from postfinancecheckout.exceptions import ApiException
 from postfinancecheckout.models import (
     LineItemCreate,
-    LineItemType,
     Refund,
     RefundCreate,
     RefundType,
@@ -42,8 +43,8 @@ class PostFinanceError(Exception):
     def __init__(
         self,
         message: str,
-        status_code: Optional[int] = None,
-        error_code: Optional[str] = None,
+        status_code: int | None = None,
+        error_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -129,12 +130,12 @@ class PostFinanceClient:
     def create_transaction(
         self,
         currency: str,
-        line_items: List[LineItemCreate],
+        line_items: list[LineItemCreate],
         success_url: str,
         failed_url: str,
-        merchant_reference: Optional[str] = None,
-        language: Optional[str] = None,
-        completion_behavior: Optional[TransactionCompletionBehavior] = None,
+        merchant_reference: str | None = None,
+        language: str | None = None,
+        completion_behavior: TransactionCompletionBehavior | None = None,
     ) -> Transaction:
         """
         Create a new payment transaction.
@@ -310,8 +311,8 @@ class PostFinanceClient:
         self,
         transaction_id: int,
         external_id: str,
-        merchant_reference: Optional[str] = None,
-        amount: Optional[float] = None,
+        merchant_reference: str | None = None,
+        amount: float | None = None,
     ) -> Refund:
         """
         Create a refund for a completed transaction.
@@ -426,32 +427,3 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error validating webhook signature: %s", e)
             raise PostFinanceError(message=str(e)) from e
-
-
-def build_line_item(
-    name: str,
-    quantity: float,
-    amount_including_tax: float,
-    unique_id: str,
-    item_type: LineItemType = LineItemType.PRODUCT,
-) -> LineItemCreate:
-    """
-    Build a line item for a transaction.
-
-    Args:
-        name: The name of the product.
-        quantity: The number of items.
-        amount_including_tax: The total amount including tax.
-        unique_id: A unique identifier for this line item.
-        item_type: The type of line item (default: PRODUCT).
-
-    Returns:
-        A LineItemCreate object for use with create_transaction.
-    """
-    return LineItemCreate(
-        name=name,
-        quantity=quantity,
-        amountIncludingTax=amount_including_tax,
-        uniqueId=unique_id,
-        type=item_type,
-    )

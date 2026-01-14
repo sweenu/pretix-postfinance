@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from django.contrib import messages
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -255,7 +255,7 @@ class PostFinanceReturnView(View):
         event: Event,
         order: Order,
         payment: OrderPayment,
-        state: Optional[TransactionState],
+        state: TransactionState | None,
     ) -> HttpResponse:
         """
         Handle pending/unknown payment states.
@@ -449,7 +449,7 @@ class PostFinanceWebhookView(View):
             )
             return False
 
-    def _get_client_for_space(self, space_id: int) -> Optional[PostFinanceClient]:
+    def _get_client_for_space(self, space_id: int) -> PostFinanceClient | None:
         """
         Find and return a PostFinanceClient for the given space ID.
 
@@ -507,10 +507,10 @@ class PostFinanceWebhookView(View):
 
     def _process_transaction_state(
         self,
-        entity_id: Optional[int],
+        entity_id: int | None,
         space_id: int,
-        state: Optional[str],
-    ) -> Optional[bool]:
+        state: str | None,
+    ) -> bool | None:
         """
         Process transaction state update from webhook.
 
@@ -589,7 +589,7 @@ class PostFinanceWebhookView(View):
     def _find_payment_by_transaction_id(
         self,
         transaction_id: int,
-    ) -> Optional[OrderPayment]:
+    ) -> OrderPayment | None:
         """
         Find a payment record by PostFinance transaction ID.
 
@@ -619,7 +619,7 @@ class PostFinanceWebhookView(View):
     def _update_payment_state(
         self,
         payment: OrderPayment,
-        transaction_state: Optional[TransactionState],
+        transaction_state: TransactionState | None,
     ) -> bool:
         """
         Update payment state based on PostFinance transaction state.
@@ -654,19 +654,19 @@ class PostFinanceWebhookView(View):
             )
             return False
 
-        if payment.state in (
-            OrderPayment.PAYMENT_STATE_FAILED,
-            OrderPayment.PAYMENT_STATE_CANCELED,
+        # For failed/canceled payments, only allow recovery to success states
+        if (
+            payment.state
+            in (OrderPayment.PAYMENT_STATE_FAILED, OrderPayment.PAYMENT_STATE_CANCELED)
+            and transaction_state not in SUCCESS_STATES
         ):
-            # For failed/canceled payments, only allow recovery to success states
-            if transaction_state not in SUCCESS_STATES:
-                logger.info(
-                    "PostFinance webhook: payment %s already failed/canceled, "
-                    "skipping non-success state update (transaction state: %s)",
-                    payment.pk,
-                    transaction_state,
-                )
-                return False
+            logger.info(
+                "PostFinance webhook: payment %s already failed/canceled, "
+                "skipping non-success state update (transaction state: %s)",
+                payment.pk,
+                transaction_state,
+            )
+            return False
 
         # Handle success states (AUTHORIZED, COMPLETED, FULFILL, CONFIRMED, PROCESSING)
         if transaction_state in SUCCESS_STATES:
@@ -721,10 +721,10 @@ class PostFinanceWebhookView(View):
 
     def _process_refund_state(
         self,
-        entity_id: Optional[int],
+        entity_id: int | None,
         space_id: int,
-        state: Optional[str],
-    ) -> Optional[bool]:
+        state: str | None,
+    ) -> bool | None:
         """
         Process refund state update from webhook.
 
@@ -852,7 +852,7 @@ class PostFinanceWebhookView(View):
     def _find_payment_by_refund_id(
         self,
         refund_id: int,
-    ) -> Optional[OrderPayment]:
+    ) -> OrderPayment | None:
         """
         Find a payment record by PostFinance refund ID.
 
@@ -887,7 +887,7 @@ class PostFinanceWebhookView(View):
 
         return None
 
-    def _parse_payload(self, request: HttpRequest) -> Dict[str, Any]:
+    def _parse_payload(self, request: HttpRequest) -> dict[str, Any]:
         """
         Parse and validate the webhook payload.
 
@@ -911,7 +911,7 @@ class PostFinanceWebhookView(View):
         try:
             payload = json.loads(request.body.decode("utf-8"))
         except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON: {e}")
+            raise ValueError(f"Invalid JSON: {e}") from e
 
         if not isinstance(payload, dict):
             raise ValueError("Payload must be a JSON object")
@@ -1102,7 +1102,7 @@ class PostFinanceRefundView(EventPermissionRequiredMixin, View):
         )
 
         # Parse refund amount from POST data (optional for partial refunds)
-        refund_amount: Optional[Decimal] = None
+        refund_amount: Decimal | None = None
         amount_str = request.POST.get("amount", "").strip()
         if amount_str:
             try:

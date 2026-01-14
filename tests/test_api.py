@@ -9,7 +9,6 @@ import pytest
 from pretix_postfinance.api import (
     PostFinanceClient,
     PostFinanceError,
-    build_line_item,
 )
 
 
@@ -65,10 +64,10 @@ class TestPostFinanceClient:
     @patch("pretix_postfinance.api.Configuration")
     def test_get_space_success(
         self,
-        mock_config,
-        mock_webhook_service,
-        mock_refunds_service,
-        mock_transactions_service,
+        _mock_config,
+        _mock_webhook_service,
+        _mock_refunds_service,
+        _mock_transactions_service,
         mock_spaces_service,
         mock_space,
     ):
@@ -95,10 +94,10 @@ class TestPostFinanceClient:
     @patch("pretix_postfinance.api.Configuration")
     def test_get_space_api_exception(
         self,
-        mock_config,
-        mock_webhook_service,
-        mock_refunds_service,
-        mock_transactions_service,
+        _mock_config,
+        _mock_webhook_service,
+        _mock_refunds_service,
+        _mock_transactions_service,
         mock_spaces_service,
     ):
         """get_space should raise PostFinanceError on API exception."""
@@ -127,11 +126,11 @@ class TestPostFinanceClient:
     @patch("pretix_postfinance.api.Configuration")
     def test_get_transaction_success(
         self,
-        mock_config,
-        mock_webhook_service,
-        mock_refunds_service,
+        _mock_config,
+        _mock_webhook_service,
+        _mock_refunds_service,
         mock_transactions_service,
-        mock_spaces_service,
+        _mock_spaces_service,
         mock_transaction,
     ):
         """get_transaction should return transaction details."""
@@ -159,11 +158,11 @@ class TestPostFinanceClient:
     @patch("pretix_postfinance.api.Configuration")
     def test_get_refund_success(
         self,
-        mock_config,
-        mock_webhook_service,
+        _mock_config,
+        _mock_webhook_service,
         mock_refunds_service,
-        mock_transactions_service,
-        mock_spaces_service,
+        _mock_transactions_service,
+        _mock_spaces_service,
         mock_refund,
     ):
         """get_refund should return refund details."""
@@ -183,38 +182,3 @@ class TestPostFinanceClient:
         mock_refunds_instance.get_payment_refunds_id.assert_called_once_with(
             id=789012, space=12345
         )
-
-
-class TestBuildLineItem:
-    """Tests for build_line_item helper function."""
-
-    def test_build_line_item_defaults(self):
-        """Build line item with default type."""
-        from postfinancecheckout.models import LineItemType
-
-        item = build_line_item(
-            name="Test Product",
-            quantity=2,
-            amount_including_tax=50.00,
-            unique_id="test-123",
-        )
-
-        assert item.name == "Test Product"
-        assert item.quantity == 2
-        assert item.amount_including_tax == 50.00
-        assert item.unique_id == "test-123"
-        assert item.type == LineItemType.PRODUCT
-
-    def test_build_line_item_custom_type(self):
-        """Build line item with custom type."""
-        from postfinancecheckout.models import LineItemType
-
-        item = build_line_item(
-            name="Shipping",
-            quantity=1,
-            amount_including_tax=5.00,
-            unique_id="shipping-1",
-            item_type=LineItemType.SHIPPING,
-        )
-
-        assert item.type == LineItemType.SHIPPING
