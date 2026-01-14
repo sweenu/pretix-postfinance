@@ -212,6 +212,19 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         required=True,
                     ),
                 ),
+                (
+                    "allowed_payment_methods",
+                    forms.CharField(
+                        label=_("Allowed Payment Methods"),
+                        help_text=_(
+                            "Restrict which payment methods are available to customers. "
+                            "Enter comma-separated payment method configuration IDs from "
+                            "your PostFinance space (e.g., '1234,5678'). "
+                            "Leave empty to allow all payment methods."
+                        ),
+                        required=False,
+                    ),
+                ),
             ]
         )
         return d
@@ -446,6 +459,22 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             else:
                 completion_behavior = TransactionCompletionBehavior.COMPLETE_IMMEDIATELY
 
+            # Parse allowed payment method configurations
+            allowed_payment_methods: list[int] | None = None
+            allowed_methods_str = self.settings.get("allowed_payment_methods", "")
+            if allowed_methods_str:
+                try:
+                    allowed_payment_methods = [
+                        int(x.strip())
+                        for x in str(allowed_methods_str).split(",")
+                        if x.strip()
+                    ]
+                except ValueError:
+                    logger.warning(
+                        "Invalid allowed_payment_methods setting: %s",
+                        allowed_methods_str,
+                    )
+
             transaction = client.create_transaction(
                 currency=currency,
                 line_items=line_items,
@@ -453,6 +482,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 failed_url=failed_url,
                 merchant_reference=merchant_reference,
                 completion_behavior=completion_behavior,
+                allowed_payment_method_configurations=allowed_payment_methods,
             )
 
             transaction_id = transaction.id

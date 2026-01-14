@@ -136,6 +136,7 @@ class PostFinanceClient:
         merchant_reference: str | None = None,
         language: str | None = None,
         completion_behavior: TransactionCompletionBehavior | None = None,
+        allowed_payment_method_configurations: list[int] | None = None,
     ) -> Transaction:
         """
         Create a new payment transaction.
@@ -150,6 +151,9 @@ class PostFinanceClient:
             completion_behavior: Optional transaction completion behavior.
                 COMPLETE_IMMEDIATELY for immediate capture,
                 COMPLETE_DEFERRED for manual capture.
+            allowed_payment_method_configurations: Optional list of payment method
+                configuration IDs to restrict which payment methods are available.
+                If not provided, all configured payment methods are available.
 
         Returns:
             The created Transaction object.
@@ -165,6 +169,7 @@ class PostFinanceClient:
             merchantReference=merchant_reference,
             language=language,
             completionBehavior=completion_behavior,
+            allowedPaymentMethodConfigurations=allowed_payment_method_configurations,
         )
 
         try:
