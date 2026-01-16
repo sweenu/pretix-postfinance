@@ -1051,7 +1051,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/fb/cf/bedf9a7fb3e9560ef
 
 [[package]]
 name = "pretix-postfinance"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "postfinancecheckout" },
