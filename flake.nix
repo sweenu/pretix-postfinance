@@ -42,8 +42,6 @@
             dependencies = [ postfinancecheckout ];
 
             pythonImportsCheck = [ "pretix_postfinance" ];
-
-            # doCheck = false;
           };
         }
       );
