@@ -1,26 +1,25 @@
 [build-system]
-requires = ["uv-build"]
-build-backend = "uv_build"
-
-[tool.uv.build-backend]
-module-root = "."
+requires = ["setuptools", "pretix-plugin-build"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "pretix-postfinance"
 version = "1.0.0"
 description = "PostFinance Checkout payment plugin for pretix"
 readme = "README.md"
-license = {text = "AGPLv3"}
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.9"
 authors = [
     {name = "Sweenu", email = "contact@sweenu.xyz"}
+]
+maintainers = [
+    {name = "Sweenu", email = "contact@sweenu.xyz"},
 ]
 keywords = ["pretix", "payment", "postfinance", "checkout"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Framework :: Django",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -31,7 +30,6 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "pretix>=2024.1.0",
     "postfinancecheckout>=6.0.0",
 ]
 
@@ -53,8 +51,18 @@ Repository = "https://github.com/sweenu/pretix-postfinance"
 [project.entry-points."pretix.plugin"]
 pretix_postfinance = "pretix_postfinance:PretixPluginMeta"
 
+[project.entry-points."distutils.commands"]
+build = "pretix_plugin_build.build:CustomBuild"
+
 [tool.setuptools]
-packages = ["pretix_postfinance"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "pretix_postfinance.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["pretix*"]
+namespaces = false
 
 [tool.mypy]
 python_version = "3.9"
@@ -68,6 +76,8 @@ check_untyped_defs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 no_implicit_optional = true
+exclude = '(^|/)(setup\.py)$'
+exclude_gitignore = true
 
 # Django plugin
 plugins = ["mypy_django_plugin.main"]
@@ -138,7 +148,7 @@ show_missing = true
 name = "cz_conventional_commits"
 version_provider = "uv"
 version_files = [
-    "pretix_postfinance/__init__.py:version",
+    "pretix_postfinance/__init__.py:__version__",
     "flake.nix:version"
 ]
 tag_format = "v$version"

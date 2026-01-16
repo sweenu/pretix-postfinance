@@ -15,23 +15,13 @@ pip install pretix-postfinance
 For NixOS users, the plugin can be installed using the flake:
 
 ```nix
+{ inputs, pkgs, ... }:
 {
-  inputs.pretix-postfinance.url = "github:sweenu/pretix-postfinance";
-
-  outputs = { self, nixpkgs, pretix-postfinance }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        {
-          services.pretix = {
-            enable = true;
-            plugins = [
-              pretix-postfinance.packages.x86_64-linux.default
-            ];
-          };
-        }
-      ];
-    };
+  services.pretix = {
+    enable = true;
+    plugins = [
+      inputs.pretix-postfinance.packages.${pkgs.stdenv.hostPlatform.system}.default
+    ];
   };
 }
 ```

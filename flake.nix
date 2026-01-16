@@ -3,63 +3,68 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs =
+    { self, nixpkgs }:
+    let
+      lib = nixpkgs.lib;
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = f: lib.genAttrs systems (system: f system);
+    in
     {
-      self,
-      nixpkgs,
-      flake-utils,
-    }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
-        python = pkgs.python312;
-      in
-      {
-        packages.default = python.pkgs.buildPythonPackage {
-          pname = "pretix-postfinance";
-          version = "1.0.0";
-          pyproject = true;
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
 
-          src = ./.;
+          pretixPython = pkgs.pretix.python;
+          pyPkgs = pretixPython.pkgs;
 
-          nativeBuildInputs = with python.pkgs; [
-            uv-build
-          ];
+          postfinancecheckout = pyPkgs.callPackage ./postfinancecheckout.nix { };
+          pretix-plugin-build = pyPkgs.callPackage ./plugin-build.nix { };
+        in
+        {
+          default = pyPkgs.buildPythonPackage {
+            pname = "pretix-postfinance";
+            version = "1.0.0";
+            src = self;
+            format = "pyproject";
 
-          # Skip tests during build (they require Django setup)
-          doCheck = false;
+            build-system = [
+              pyPkgs.setuptools
+              pretix-plugin-build
+            ];
 
-          pythonImportsCheck = [ "pretix_postfinance" ];
+            dependencies = [ postfinancecheckout ];
 
-          meta = {
-            description = "PostFinance Checkout payment plugin for pretix";
-            homepage = "https://github.com/sweenu/pretix-postfinance";
-            license = pkgs.lib.licenses.agpl3Only;
+            pythonImportsCheck = [ "pretix_postfinance" ];
+
+            # doCheck = false;
           };
-        };
+        }
+      );
 
-        packages.pretix-postfinance = self.packages.${system}.default;
-
-        devShells.default = pkgs.mkShell {
-          buildInputs = [
-            python
-            python.pkgs.uv
-          ];
-
-          shellHook = ''
-            echo "pretix-postfinance development environment"
-            echo "Run: uv pip install -e \".[dev]\" to install dependencies"
-            echo ""
-            echo "Available commands:"
-            echo "  uv run ruff check ."
-            echo "  uv run mypy pretix_postfinance/"
-            echo "  uv run pytest tests/"
-          '';
-        };
-      }
-    );
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          pretixPython = pkgs.pretix.python;
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              (pretixPython.withPackages (ps: [
+                ps.pretix-postfinance
+                ps.postfinancecheckout
+                ps.pretix-plugin-build
+              ]))
+            ];
+          };
+        }
+      );
+    };
 }

@@ -1,0 +1,4 @@
+recursive-include pretix_postfinance/static *
+recursive-include pretix_postfinance/templates *
+recursive-include pretix_postfinance/locale *
+include LICENSE

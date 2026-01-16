@@ -1,0 +1,5 @@
+[plugin]
+package = "pretix-postfinance"
+modules = [ "pretix_postfinance" ]
+marketplace_name = "postfinance"
+
