@@ -31,6 +31,7 @@ class PluginApp(_PluginConfigBase):
         author = "Sweenu"
         description = gettext_lazy("PostFinance Checkout payment plugin for pretix")
         visible = True
+        picture = "pretix_postfinance/pf_logo.svg"
         version = __version__
         category = "PAYMENT"
         compatibility = "pretix>=2.7.0"
