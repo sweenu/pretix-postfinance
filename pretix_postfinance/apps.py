@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from django.utils.translation import gettext_lazy
+from django.utils.translation import gettext_lazy as _
 
 from . import __version__
 
@@ -27,14 +27,21 @@ class PluginApp(_PluginConfigBase):
     verbose_name = "PostFinance"
 
     class PretixPluginMeta:
-        name = gettext_lazy("PostFinance")
+        name = _("PostFinance")
         author = "Sweenu"
-        description = gettext_lazy("PostFinance Checkout payment plugin for pretix")
+        description = _("PostFinance Checkout payment plugin for pretix")
         visible = True
         picture = "pretix_postfinance/pf_logo.svg"
         version = __version__
         category = "PAYMENT"
         compatibility = "pretix>=2.7.0"
+        settings_links = (
+            (
+                (_("Payment"), _("PostFinance")),
+                "control:event.settings.payment.provider",
+                {"provider": "postfinance"},
+            ),
+        )
 
     def ready(self) -> None:
         from . import signals  # noqa: F401
