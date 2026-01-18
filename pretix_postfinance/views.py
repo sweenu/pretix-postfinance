@@ -68,9 +68,7 @@ class PostFinanceReturnView(View):
                 order_code,
             )
             messages.error(request, str(_("Invalid request.")))
-            return redirect(
-                eventreverse(event, "presale:event.index")
-            )
+            return redirect(eventreverse(event, "presale:event.index"))
 
         payment = get_object_or_404(
             OrderPayment,
@@ -90,9 +88,7 @@ class PostFinanceReturnView(View):
                 str(_("Payment information not found. Please try again.")),
             )
             return redirect(
-                eventreverse(
-                    event, "presale:event.checkout", kwargs={"step": "payment"}
-                )
+                eventreverse(event, "presale:event.checkout", kwargs={"step": "payment"})
             )
 
         try:
@@ -112,11 +108,13 @@ class PostFinanceReturnView(View):
                 payment_method = transaction.payment_connector_configuration.name
 
             payment.info_data = payment.info_data or {}
-            payment.info_data.update({
-                "transaction_id": transaction_id,
-                "state": state.value if state else None,
-                "payment_method": payment_method,
-            })
+            payment.info_data.update(
+                {
+                    "transaction_id": transaction_id,
+                    "state": state.value if state else None,
+                    "payment_method": payment_method,
+                }
+            )
             payment.save(update_fields=["info"])
 
             if state in SUCCESS_STATES:
@@ -137,10 +135,14 @@ class PostFinanceReturnView(View):
                 str(_("Could not verify payment status. Please contact support.")),
             )
             return redirect(
-                eventreverse(event, "presale:event.order", kwargs={
-                    "order": order.code,
-                    "secret": order.secret,
-                })
+                eventreverse(
+                    event,
+                    "presale:event.order",
+                    kwargs={
+                        "order": order.code,
+                        "secret": order.secret,
+                    },
+                )
             )
 
     def _get_client(self, payment: OrderPayment) -> PostFinanceClient:
@@ -202,10 +204,15 @@ class PostFinanceReturnView(View):
                 )
 
         return redirect(
-            eventreverse(event, "presale:event.order", kwargs={
-                "order": order.code,
-                "secret": order.secret,
-            }) + "?paid=yes"
+            eventreverse(
+                event,
+                "presale:event.order",
+                kwargs={
+                    "order": order.code,
+                    "secret": order.secret,
+                },
+            )
+            + "?paid=yes"
         )
 
     def _handle_failure(
@@ -243,11 +250,7 @@ class PostFinanceReturnView(View):
             ),
         )
 
-        return redirect(
-            eventreverse(
-                event, "presale:event.checkout", kwargs={"step": "payment"}
-            )
-        )
+        return redirect(eventreverse(event, "presale:event.checkout", kwargs={"step": "payment"}))
 
     def _handle_pending(
         self,
@@ -283,10 +286,14 @@ class PostFinanceReturnView(View):
         )
 
         return redirect(
-            eventreverse(event, "presale:event.order", kwargs={
-                "order": order.code,
-                "secret": order.secret,
-            })
+            eventreverse(
+                event,
+                "presale:event.order",
+                kwargs={
+                    "order": order.code,
+                    "secret": order.secret,
+                },
+            )
         )
 
 
@@ -327,9 +334,7 @@ class PostFinanceWebhookView(View):
         # Get space_id from payload
         space_id = payload.get("spaceId")
         if not space_id:
-            logger.warning(
-                "PostFinance webhook: missing spaceId in payload"
-            )
+            logger.warning("PostFinance webhook: missing spaceId in payload")
             return JsonResponse(
                 {"error": "Missing spaceId in payload"},
                 status=400,
@@ -372,8 +377,7 @@ class PostFinanceWebhookView(View):
         state = payload.get("state")
 
         logger.info(
-            "PostFinance webhook received: entityId=%s, listenerEntityId=%s, "
-            "spaceId=%s, state=%s",
+            "PostFinance webhook received: entityId=%s, listenerEntityId=%s, spaceId=%s, state=%s",
             entity_id,
             listener_entity_id,
             space_id,
@@ -576,11 +580,13 @@ class PostFinanceWebhookView(View):
             payment_method = transaction.payment_connector_configuration.name
 
         payment.info_data = payment.info_data or {}
-        payment.info_data.update({
-            "transaction_id": entity_id,
-            "state": transaction_state.value if transaction_state else None,
-            "payment_method": payment_method,
-        })
+        payment.info_data.update(
+            {
+                "transaction_id": entity_id,
+                "state": transaction_state.value if transaction_state else None,
+                "payment_method": payment_method,
+            }
+        )
         payment.save(update_fields=["info"])
 
         # Process state transition (idempotent)
@@ -673,8 +679,7 @@ class PostFinanceWebhookView(View):
             try:
                 payment.confirm()
                 logger.info(
-                    "PostFinance webhook: payment %s confirmed via webhook "
-                    "(transaction state: %s)",
+                    "PostFinance webhook: payment %s confirmed via webhook (transaction state: %s)",
                     payment.pk,
                     transaction_state,
                 )
@@ -691,8 +696,7 @@ class PostFinanceWebhookView(View):
         if transaction_state in FAILURE_STATES:
             payment.fail(info={"state": transaction_state.value})
             logger.info(
-                "PostFinance webhook: payment %s failed via webhook "
-                "(transaction state: %s)",
+                "PostFinance webhook: payment %s failed via webhook (transaction state: %s)",
                 payment.pk,
                 transaction_state,
             )
@@ -780,8 +784,7 @@ class PostFinanceWebhookView(View):
         refund_date = str(refund.created_on) if refund.created_on else None
 
         logger.info(
-            "PostFinance webhook: processing refund %s state=%s amount=%s date=%s "
-            "for payment %s",
+            "PostFinance webhook: processing refund %s state=%s amount=%s date=%s for payment %s",
             entity_id,
             refund_state,
             refund_amount,
@@ -806,8 +809,7 @@ class PostFinanceWebhookView(View):
                     entry["refund_date"] = refund_date
                 updated = True
                 logger.info(
-                    "PostFinance webhook: refund %s state updated from %s to %s "
-                    "for payment %s",
+                    "PostFinance webhook: refund %s state updated from %s to %s for payment %s",
                     entity_id,
                     old_state,
                     new_state,
@@ -939,18 +941,22 @@ class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):
         provider = providers.get("postfinance")
 
         if not provider:
-            return JsonResponse({
-                "success": False,
-                "message": str(_("PostFinance payment provider not found.")),
-            })
+            return JsonResponse(
+                {
+                    "success": False,
+                    "message": str(_("PostFinance payment provider not found.")),
+                }
+            )
 
         # Test the connection
         success, message = provider.test_connection()
 
-        return JsonResponse({
-            "success": success,
-            "message": message,
-        })
+        return JsonResponse(
+            {
+                "success": success,
+                "message": message,
+            }
+        )
 
 
 class PostFinanceCaptureView(EventPermissionRequiredMixin, View):

@@ -179,6 +179,4 @@ class TestPostFinanceClient:
         result = client.get_refund(789012)
 
         assert result == mock_refund
-        mock_refunds_instance.get_payment_refunds_id.assert_called_once_with(
-            id=789012, space=12345
-        )
+        mock_refunds_instance.get_payment_refunds_id.assert_called_once_with(id=789012, space=12345)

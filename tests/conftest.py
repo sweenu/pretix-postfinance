@@ -93,7 +93,7 @@ def mock_request():
     request.META = {"CSRF_COOKIE": "test-csrf-token"}
     request.POST = {}
     request.headers = {}
-    request.body = b'{}'
+    request.body = b"{}"
     request.content_type = "application/json"
     return request
 

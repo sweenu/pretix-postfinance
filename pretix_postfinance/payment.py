@@ -84,9 +84,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return str(custom_name)
         return str(_("PostFinance"))
 
-    def checkout_confirm_render(
-        self, request: HttpRequest, order: Order | None = None
-    ) -> str:
+    def checkout_confirm_render(self, request: HttpRequest, order: Order | None = None) -> str:
         """
         Render the payment confirmation page content.
 
@@ -360,21 +358,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             if e.status_code == 401:
                 return (
                     False,
-                    str(
-                        _(
-                            "Authentication failed. Please check your User ID and "
-                            "API Secret."
-                        )
-                    ),
+                    str(_("Authentication failed. Please check your User ID and API Secret.")),
                 )
             elif e.status_code == 404:
                 return (
                     False,
-                    str(
-                        _(
-                            "Space not found. Please check your Space ID."
-                        )
-                    ),
+                    str(_("Space not found. Please check your Space ID.")),
                 )
             return (False, str(_("Connection failed: {error}").format(error=str(e))))
         except Exception as e:
@@ -389,9 +378,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         return request.session.get("payment_postfinance_transaction_id") is not None
 
-    def _build_line_items(
-        self, cart: dict[str, Any], currency: str
-    ) -> list[LineItemCreate]:
+    def _build_line_items(self, cart: dict[str, Any], currency: str) -> list[LineItemCreate]:
         """
         Build PostFinance line items from pretix cart.
 
@@ -473,9 +460,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         return line_items
 
-    def checkout_prepare(
-        self, request: HttpRequest, cart: dict[str, Any]
-    ) -> bool | str:
+    def checkout_prepare(self, request: HttpRequest, cart: dict[str, Any]) -> bool | str:
         """
         Prepare the checkout for payment.
 
@@ -521,9 +506,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             if allowed_methods_str:
                 try:
                     allowed_payment_methods = [
-                        int(x.strip())
-                        for x in str(allowed_methods_str).split(",")
-                        if x.strip()
+                        int(x.strip()) for x in str(allowed_methods_str).split(",") if x.strip()
                     ]
                 except ValueError:
                     logger.warning(
@@ -586,9 +569,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             return False
 
-    def execute_payment(
-        self, request: HttpRequest, payment: OrderPayment
-    ) -> str | None:
+    def execute_payment(self, request: HttpRequest, payment: OrderPayment) -> str | None:
         """
         Execute the payment after the order is confirmed.
 
@@ -673,9 +654,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             del request.session["payment_postfinance_transaction_id"]
 
         except PostFinanceError as e:
-            logger.exception(
-                "PostFinance API error during execute_payment: %s", e
-            )
+            logger.exception("PostFinance API error during execute_payment: %s", e)
             payment.info_data = {
                 "transaction_id": transaction_id,
                 "error": str(e),
@@ -695,9 +674,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         return None
 
-    def payment_control_render(
-        self, request: HttpRequest, payment: OrderPayment
-    ) -> str:
+    def payment_control_render(self, request: HttpRequest, payment: OrderPayment) -> str:
         """
         Render payment control HTML for the admin order view.
 
@@ -929,12 +906,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         'step="0.01" min="0.01" max="{max_amount}" '
                         'placeholder="{max_amount}" '
                         'style="width: 100px; margin-right: 5px;"> '
-                        '{currency}'
-                        '</div>'
+                        "{currency}"
+                        "</div>"
                         '<button type="submit" class="btn btn-warning btn-sm">'
-                        '{refund_text}'
-                        '</button>'
-                        '</form>',
+                        "{refund_text}"
+                        "</button>"
+                        "</form>",
                         refund_url=refund_url,
                         csrf=request.META.get("CSRF_COOKIE", ""),
                         amount_label=_("Refund Amount"),
@@ -948,9 +925,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return "<br>".join(parts)
         return ""
 
-    def execute_capture(
-        self, payment: OrderPayment
-    ) -> tuple[bool, str | None]:
+    def execute_capture(self, payment: OrderPayment) -> tuple[bool, str | None]:
         """
         Capture (complete) an authorized transaction.
 
@@ -1033,9 +1008,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             return (False, str(_("Unexpected error: {error}").format(error=str(e))))
 
-    def execute_void(
-        self, payment: OrderPayment
-    ) -> tuple[bool, str | None]:
+    def execute_void(self, payment: OrderPayment) -> tuple[bool, str | None]:
         """
         Void an authorized transaction.
 
