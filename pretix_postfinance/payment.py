@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections import OrderedDict
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -8,17 +9,21 @@ from typing import TYPE_CHECKING, Any
 from django import forms
 from django.contrib import messages
 from django.http import HttpRequest
+from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
+from i18nfield.forms import I18nFormField
+from i18nfield.strings import LazyI18nString
 from postfinancecheckout.models import (
     LineItemCreate,
     LineItemType,
     TransactionCompletionBehavior,
     TransactionState,
 )
-from pretix.base.models import OrderPayment
-from pretix.base.payment import BasePaymentProvider
+from pretix.base.forms import SecretKeySettingsField
+from pretix.base.models import OrderPayment, OrderRefund
+from pretix.base.payment import BasePaymentProvider, PaymentException
 from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .api import PostFinanceClient, PostFinanceError
@@ -69,7 +74,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     """
 
     identifier = "postfinance"
-    verbose_name = _("PostFinance")
+    verbose_name = "PostFinance"
+    abort_pending_allowed = False
+    execute_payment_needs_user = True
 
     @property
     def public_name(self) -> str:
@@ -79,39 +86,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         If a custom display name is configured in event settings, use that.
         Otherwise fall back to the default verbose name.
         """
-        custom_name = self.settings.get("display_name")
-        if custom_name:
-            return str(custom_name)
-        return str(_("PostFinance"))
-
-    def checkout_confirm_render(self, request: HttpRequest, order: Order | None = None) -> str:
-        """
-        Render the payment confirmation page content.
-
-        This is displayed to the customer before they confirm their order
-        to summarize what will happen during payment.
-
-        If a custom description is configured in event settings, use that.
-        Otherwise fall back to the default message.
-        """
-        custom_description = self.settings.get("description")
-        if custom_description:
-            return str(custom_description)
-        return str(
-            _(
-                "You will be redirected to PostFinance to complete your payment. "
-                "After completing the payment, you will be returned to this site."
-            )
-        )
+        return str(self.settings.get("public_name", as_type=LazyI18nString or self.verbose_name))
 
     @property
-    def settings_form_fields(self) -> OrderedDict[str, forms.Field]:
+    def settings_form_fields(self) -> OrderedDict:
         """
         Return the form fields for the payment provider settings.
 
         These will be displayed in the event's payment settings.
         """
-        d: OrderedDict[str, Any] = OrderedDict(
+        d = OrderedDict(
             list(super().settings_form_fields.items())
             + [
                 (
@@ -120,8 +104,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         label=_("Space ID"),
                         help_text=_(
                             "Your PostFinance Checkout space ID. "
-                            "You can find this in your PostFinance Checkout account "
-                            "under Space > General Settings."
+                            "You can find it next to your space name in your "
+                            "PostFinance Checkout account."
                         ),
                         required=True,
                     ),
@@ -139,18 +123,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     ),
                 ),
                 (
-                    "api_secret",
-                    forms.CharField(
-                        label=_("API Secret"),
+                    "auth_key",
+                    SecretKeySettingsField(
+                        label=_("Authentication key"),
                         help_text=_(
-                            "The API secret (authentication key) for your application user. "
+                            "The authentication key for your application user. "
                             "This is shown only once when creating the application user."
                         ),
                         required=True,
-                        widget=forms.PasswordInput(
-                            render_value=True,
-                            attrs={"autocomplete": "new-password"},
-                        ),
                     ),
                 ),
                 (
@@ -159,7 +139,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         label=_("Environment"),
                         help_text=_(
                             "Select 'Sandbox' for testing or 'Production' for live payments. "
-                            "Use sandbox credentials when testing."
                         ),
                         choices=[
                             ("sandbox", _("Sandbox (Testing)")),
@@ -170,8 +149,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     ),
                 ),
                 (
-                    "display_name",
-                    forms.CharField(
+                    "public_name",
+                    I18nFormField(
                         label=_("Display Name"),
                         help_text=_(
                             "Custom name shown to customers during checkout. "
@@ -233,12 +212,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         Adds a "Test Connection" button that validates the configured
         PostFinance credentials via AJAX.
-
-        Args:
-            request: The HTTP request object.
-
-        Returns:
-            HTML string with the test connection button and JavaScript.
         """
         test_url = reverse(
             "plugins:pretix_postfinance:postfinance.test_connection",
@@ -247,67 +220,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 "event": self.event.slug,
             },
         )
-
-        return format_html(
-            """
-            <div class="form-group">
-                <label class="col-md-3 control-label">{label}</label>
-                <div class="col-md-9">
-                    <button type="button" class="btn btn-default" id="postfinance-test-connection">
-                        {button_text}
-                    </button>
-                    <span id="postfinance-test-result" style="margin-left: 10px;"></span>
-                </div>
-            </div>
-            <script>
-            (function() {{
-                var btn = document.getElementById('postfinance-test-connection');
-                var result = document.getElementById('postfinance-test-result');
-                btn.addEventListener('click', function() {{
-                    btn.disabled = true;
-                    btn.textContent = '{testing_text}';
-                    result.textContent = '';
-                    result.className = '';
-
-                    fetch('{test_url}', {{
-                        method: 'POST',
-                        headers: {{
-                            'X-CSRFToken': '{csrf_token}',
-                            'Content-Type': 'application/json'
-                        }},
-                        credentials: 'same-origin'
-                    }})
-                    .then(function(response) {{ return response.json(); }})
-                    .then(function(data) {{
-                        btn.disabled = false;
-                        btn.textContent = '{button_text}';
-                        result.textContent = data.message;
-                        result.style.color = data.success ? 'green' : 'red';
-                    }})
-                    .catch(function(error) {{
-                        btn.disabled = false;
-                        btn.textContent = '{button_text}';
-                        result.textContent = '{error_text}';
-                        result.style.color = 'red';
-                    }});
-                }});
-            }})();
-            </script>
-            """,
-            label=_("Connection Test"),
-            button_text=_("Test Connection"),
-            testing_text=_("Testing..."),
-            test_url=test_url,
-            csrf_token=request.META.get("CSRF_COOKIE", ""),
-            error_text=_("Connection test failed. Please try again."),
-        )
+        template = get_template("pretixplugins/postfinance/settings_test_connection_button.html")
+        ctx = {
+            "label": _("Connection Test"),
+            "button_text": _("Test Connection"),
+            "testing_text": _("Testing..."),
+            "test_url": test_url,
+            "csrf_token": request.META.get("CSRF_COOKIE", ""),
+            "error_text": _("Connection test failed. Please try again."),
+        }
+        return template.render(ctx)
 
     def _get_client(self) -> PostFinanceClient:
         """
         Create and return a PostFinance API client using the configured settings.
-
-        Returns:
-            A configured PostFinanceClient instance.
         """
         return PostFinanceClient(
             space_id=int(self.settings.get("space_id", 0)),
@@ -320,12 +246,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Test the connection to PostFinance API using configured credentials.
 
-        Verifies that the credentials are valid by fetching the space details.
-
         Returns:
             A tuple of (success: bool, message: str).
-            On success, message contains the space name.
-            On failure, message contains the error description.
         """
         space_id = self.settings.get("space_id")
         user_id = self.settings.get("user_id")
@@ -382,15 +304,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Build PostFinance line items from pretix cart.
 
-        Creates detailed line items for each cart position and fee, providing
-        itemized receipts on the PostFinance payment page.
-
-        Args:
-            cart: The pretix cart dictionary with 'positions', 'fees', and 'total'.
-            currency: The currency code.
-
-        Returns:
-            List of LineItemCreate objects for PostFinance API.
+        Creates detailed line items for each cart position and fee.
         """
         line_items: list[LineItemCreate] = []
 
@@ -432,15 +346,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             elif hasattr(fee, "fee_type"):
                 fee_name = str(fee.fee_type)
 
-            # Determine line item type based on fee
-            line_type = LineItemType.FEE
-
             line_items.append(
                 LineItemCreate(
                     name=fee_name,
                     quantity=1,
                     amountIncludingTax=float(fee_value),
-                    type=line_type,
+                    type=LineItemType.FEE,
                     uniqueId=f"fee-{idx}",
                 )
             )
@@ -466,13 +377,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         Creates a PostFinance transaction and returns the payment page URL
         to redirect the customer to PostFinance for payment.
-
-        Args:
-            request: The HTTP request object.
-            cart: The cart dictionary containing items and total.
-
-        Returns:
-            The PostFinance payment page URL to redirect to, or False on error.
         """
         try:
             client = self._get_client()
@@ -569,19 +473,31 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             return False
 
+    def checkout_confirm_render(
+        self, request: HttpRequest, order: Order | None = None, info_data: dict | None = None
+    ) -> str:
+        """
+        Render the payment confirmation page content.
+
+        This is displayed to the customer before they confirm their order
+        to summarize what will happen during payment.
+        """
+        custom_description = self.settings.get("description")
+        if custom_description:
+            return str(custom_description)
+        return str(
+            _(
+                "You will be redirected to PostFinance to complete your payment. "
+                "After completing the payment, you will be returned to this site."
+            )
+        )
+
     def execute_payment(self, request: HttpRequest, payment: OrderPayment) -> str | None:
         """
         Execute the payment after the order is confirmed.
 
         Retrieves the transaction details from PostFinance, checks the
         transaction state, and confirms or fails the payment accordingly.
-
-        Args:
-            request: The HTTP request object.
-            payment: The OrderPayment object.
-
-        Returns:
-            None on success, or a URL to redirect to.
         """
         transaction_id = request.session.get("payment_postfinance_transaction_id")
 
@@ -618,7 +534,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 payment.pk,
             )
 
-            # Handle different transaction states
             if state in SUCCESS_STATES:
                 try:
                     payment.confirm()
@@ -628,13 +543,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         state,
                     )
                 except Exception as e:
-                    # Log but don't fail - payment was successful even if
-                    # confirmation has issues (e.g., quota exceeded)
                     logger.exception(
                         "Error confirming payment %s: %s",
                         payment.pk,
                         e,
                     )
+                    raise PaymentException(
+                        str(
+                            _("Payment was successful but order confirmation failed: {error}")
+                        ).format(error=str(e))
+                    ) from e
             elif state in FAILURE_STATES:
                 payment.fail(info={"state": state.value if state else None})
                 logger.info(
@@ -643,7 +561,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     state,
                 )
             else:
-                # Transaction is still pending (CREATE, PENDING, etc.)
                 logger.info(
                     "Payment %s is pending (PostFinance state: %s)",
                     payment.pk,
@@ -651,7 +568,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 )
 
             # Clean up session
-            del request.session["payment_postfinance_transaction_id"]
+            if "payment_postfinance_transaction_id" in request.session:
+                del request.session["payment_postfinance_transaction_id"]
 
         except PostFinanceError as e:
             logger.exception("PostFinance API error during execute_payment: %s", e)
@@ -662,6 +580,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 "error_status_code": e.status_code,
             }
             payment.save(update_fields=["info"])
+            raise PaymentException(
+                str(_("Payment processing failed: {error}")).format(error=str(e))
+            ) from e
 
         except Exception as e:
             logger.exception("Unexpected error during execute_payment: %s", e)
@@ -671,22 +592,62 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 "error_code": type(e).__name__,
             }
             payment.save(update_fields=["info"])
+            raise PaymentException(
+                str(_("An unexpected error occurred: {error}")).format(error=str(e))
+            ) from e
 
         return None
+
+    def payment_pending_render(self, request: HttpRequest, payment: OrderPayment) -> str:
+        """
+        Render customer-facing instructions on how to proceed with a pending payment.
+        """
+        info_data = payment.info_data or {}
+        transaction_id = info_data.get("transaction_id")
+        state = info_data.get("state")
+
+        parts = []
+
+        parts.append(f"<p><strong>{_('Your payment is being processed.')}</strong></p>")
+
+        if state == TransactionState.PENDING.value:
+            msg = _(
+                "Your payment has been initiated and is waiting for confirmation "
+                "from your bank or payment provider."
+            )
+            parts.append(f"<p>{msg}</p>")
+        elif state == TransactionState.PROCESSING.value:
+            msg = _("Your payment is currently being processed. This usually takes a few moments.")
+            parts.append(f"<p>{msg}</p>")
+        else:
+            msg = _(
+                "Your payment is being verified. You will receive a confirmation email "
+                "once completed."
+            )
+            parts.append(f"<p>{msg}</p>")
+
+        if transaction_id:
+            parts.append(f"<p>{_('Transaction reference')}: <code>{transaction_id}</code></p>")
+
+        parts.append(
+            "<div style='margin-top: 15px; padding: 10px; "
+            "background-color: #f8f9fa; border-left: 3px solid #007bff;'>"
+            f"<strong>{_('What happens next?')}</strong>"
+            "<ul style='margin: 10px 0 0 0; padding-left: 20px;'>"
+            f"<li>{_('Most payments are confirmed within a few minutes')}</li>"
+            f"<li>{_('You will receive an email confirmation once your payment is complete')}</li>"
+            f"<li>{_('You can refresh this page to check for updates')}</li>"
+            "</ul>"
+            "</div>"
+        )
+
+        return "".join(parts)
 
     def payment_control_render(self, request: HttpRequest, payment: OrderPayment) -> str:
         """
         Render payment control HTML for the admin order view.
 
-        Displays PostFinance transaction details and, for AUTHORIZED payments,
-        provides a capture button to manually complete the transaction.
-
-        Args:
-            request: The HTTP request object.
-            payment: The OrderPayment object.
-
-        Returns:
-            HTML string to display in the admin panel.
+        Displays PostFinance transaction details and action buttons.
         """
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
@@ -743,13 +704,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 )
             )
 
-        # Show error details if any (for admin troubleshooting)
+        # Show error details if any
         error_message = info_data.get("error")
         if error_message:
             error_code = info_data.get("error_code")
             error_status = info_data.get("error_status_code")
 
-            # Build error display with actionable suggestion if available
             error_parts = [str(error_message)]
             if error_code:
                 error_parts.append(f"Code: {error_code}")
@@ -925,20 +885,239 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return "<br>".join(parts)
         return ""
 
+    def payment_presale_render(self, payment: OrderPayment) -> str:
+        """
+        Return a short description of the payment for customer view.
+        """
+        info_data = payment.info_data or {}
+        payment_method = info_data.get("payment_method")
+        if payment_method:
+            return f"{self.public_name} ({payment_method})"
+        return str(self.public_name)
+
+    def payment_control_render_short(self, payment: OrderPayment) -> str:
+        """
+        Return a very short version of the payment method for admin actions.
+        """
+        info_data = payment.info_data or {}
+        transaction_id = info_data.get("transaction_id")
+        if transaction_id:
+            return f"PostFinance ({transaction_id})"
+        return "PostFinance"
+
+    def payment_refund_supported(self, payment: OrderPayment) -> bool:
+        """
+        Check if automatic refunding is supported for this payment.
+        """
+        info_data = payment.info_data or {}
+        state = info_data.get("state")
+        refundable_states = {
+            TransactionState.COMPLETED.value,
+            TransactionState.FULFILL.value,
+        }
+        return state in refundable_states
+
+    def payment_partial_refund_supported(self, payment: OrderPayment) -> bool:
+        """
+        Check if automatic partial refunding is supported for this payment.
+        """
+        return self.payment_refund_supported(payment)
+
+    def execute_refund(self, refund: OrderRefund) -> None:
+        """
+        Execute a refund for an order.
+
+        This is called by pretix when a refund needs to be processed.
+        """
+        payment = refund.payment
+        info_data = payment.info_data or {}
+        transaction_id = info_data.get("transaction_id")
+
+        if not transaction_id:
+            raise PaymentException(_("Transaction ID not found."))
+
+        # Check if transaction is in a refundable state
+        current_state = info_data.get("state")
+        refundable_states = {
+            TransactionState.COMPLETED.value,
+            TransactionState.FULFILL.value,
+        }
+        if current_state not in refundable_states:
+            raise PaymentException(
+                _("Transaction cannot be refunded. Current state: {state}").format(
+                    state=current_state or "Unknown"
+                )
+            )
+
+        # Calculate refundable amount
+        original_amount = payment.amount
+        total_refunded = Decimal(str(info_data.get("total_refunded_amount", 0)))
+        remaining_refundable = original_amount - total_refunded
+
+        if remaining_refundable <= Decimal("0"):
+            raise PaymentException(_("Transaction has already been fully refunded."))
+
+        refund_amount = refund.amount
+
+        # Validate refund amount
+        if refund_amount <= Decimal("0"):
+            raise PaymentException(_("Refund amount must be greater than zero."))
+
+        if refund_amount > remaining_refundable:
+            raise PaymentException(
+                _(
+                    "Refund amount ({refund_amount}) exceeds remaining "
+                    "refundable amount ({remaining})."
+                ).format(
+                    refund_amount=refund_amount,
+                    remaining=remaining_refundable,
+                )
+            )
+
+        try:
+            client = self._get_client()
+
+            # Generate a unique external ID for idempotency
+            external_id = f"pretix-refund-{payment.pk}-{uuid.uuid4().hex[:8]}"
+            merchant_reference = f"pretix-{self.event.slug}-{payment.order.code}"
+
+            postfinance_refund = client.refund_transaction(
+                transaction_id=int(transaction_id),
+                external_id=external_id,
+                merchant_reference=merchant_reference,
+                amount=float(refund_amount),
+            )
+
+            # Update total refunded amount
+            actual_refund_amount = (
+                float(postfinance_refund.amount)
+                if postfinance_refund.amount
+                else float(refund_amount)
+            )
+            new_total_refunded = float(total_refunded) + actual_refund_amount
+
+            # Build refund history entry
+            refund_entry = {
+                "refund_id": postfinance_refund.id,
+                "refund_state": (
+                    postfinance_refund.state.value if postfinance_refund.state else None
+                ),
+                "refund_amount": actual_refund_amount,
+                "refund_date": (
+                    str(postfinance_refund.created_on) if postfinance_refund.created_on else None
+                ),
+            }
+
+            # Get or create refund history list
+            refund_history = info_data.get("refund_history", [])
+            refund_history.append(refund_entry)
+
+            # Update payment info with refund details
+            info_data["refund_history"] = refund_history
+            info_data["total_refunded_amount"] = new_total_refunded
+            payment.info_data = info_data
+            payment.save(update_fields=["info"])
+
+            # Mark refund as done in pretix
+            refund.done()
+
+            logger.info(
+                "PostFinance refund %s created successfully for payment %s "
+                "(transaction %s, amount %s, total refunded %s)",
+                postfinance_refund.id,
+                payment.pk,
+                transaction_id,
+                actual_refund_amount,
+                new_total_refunded,
+            )
+
+        except PostFinanceError as e:
+            logger.exception(
+                "PostFinance API error refunding transaction %s: %s",
+                transaction_id,
+                e,
+            )
+            raise PaymentException(_("Refund failed: {error}").format(error=str(e))) from e
+        except Exception as e:
+            logger.exception(
+                "Unexpected error refunding transaction %s: %s",
+                transaction_id,
+                e,
+            )
+            raise PaymentException(_("Unexpected error: {error}").format(error=str(e))) from e
+
+    def api_payment_details(self, payment: OrderPayment) -> dict:
+        """
+        Return payment details for the REST API.
+        """
+        info_data = payment.info_data or {}
+        return {
+            "transaction_id": info_data.get("transaction_id"),
+            "state": info_data.get("state"),
+            "payment_method": info_data.get("payment_method"),
+            "created_on": info_data.get("created_on"),
+        }
+
+    def matching_id(self, payment: OrderPayment) -> str | None:
+        """
+        Return the transaction ID for matching with external records.
+        """
+        info_data = payment.info_data or {}
+        return info_data.get("transaction_id")
+
+    def refund_matching_id(self, refund: OrderRefund) -> str | None:
+        """
+        Return the refund ID for matching with external records.
+        """
+        payment = refund.payment
+        info_data = payment.info_data or {}
+        refund_history = info_data.get("refund_history", [])
+
+        # Find the last refund entry that matches this refund amount
+        for entry in reversed(refund_history):
+            if Decimal(str(entry.get("refund_amount", 0))) == refund.amount:
+                return str(entry.get("refund_id"))
+
+        return None
+
+    def shred_payment_info(self, obj: OrderPayment | OrderRefund) -> None:
+        """
+        Remove personal data from payment/refund info when requested.
+        """
+        if not isinstance(obj, (OrderPayment, OrderRefund)):
+            return
+
+        # Keep transaction/refund IDs for reference, but remove other details
+        if isinstance(obj, OrderPayment):
+            info_data = obj.info_data or {}
+            obj.info_data = {
+                "transaction_id": info_data.get("transaction_id"),
+                "state": info_data.get("state"),
+                "_shredded": True,
+            }
+            obj.save(update_fields=["info"])
+        else:
+            # For refunds, clear the info
+            obj.info_data = {"_shredded": True}
+            obj.save(update_fields=["info"])
+
+    def cancel_payment(self, payment: OrderPayment) -> None:
+        """
+        Cancel a payment.
+
+        For PostFinance, if the transaction is in AUTHORIZED state, we void it.
+        For other states, we use the default cancellation behavior.
+        """
+        self.execute_void(payment)
+
+        # Call parent implementation to set payment state to canceled
+        super().cancel_payment(payment)
+
+    # Helper methods for custom views (capture, void, refund)
+
     def execute_capture(self, payment: OrderPayment) -> tuple[bool, str | None]:
         """
         Capture (complete) an authorized transaction.
-
-        This method is called from the capture view to manually complete
-        a transaction that is in the AUTHORIZED state.
-
-        Args:
-            payment: The OrderPayment to capture.
-
-        Returns:
-            A tuple of (success: bool, error_message: Optional[str]).
-            On success, error_message is None.
-            On failure, error_message contains the error description.
         """
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
@@ -978,13 +1157,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # Confirm the payment in pretix
             try:
                 payment.confirm()
-                logger.info(
-                    "Payment %s confirmed after capture",
-                    payment.pk,
-                )
+                logger.info("Payment %s confirmed after capture", payment.pk)
             except Exception as e:
-                # Log but don't fail - capture was successful even if
-                # confirmation has issues (e.g., quota exceeded)
                 logger.exception(
                     "Error confirming payment %s after capture: %s",
                     payment.pk,
@@ -1011,17 +1185,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     def execute_void(self, payment: OrderPayment) -> tuple[bool, str | None]:
         """
         Void an authorized transaction.
-
-        This method is called from the void view to void a transaction
-        that is in the AUTHORIZED state, releasing the authorization hold.
-
-        Args:
-            payment: The OrderPayment to void.
-
-        Returns:
-            A tuple of (success: bool, error_message: Optional[str]).
-            On success, error_message is None.
-            On failure, error_message contains the error description.
         """
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
@@ -1061,10 +1224,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # Fail the payment in pretix (void means the payment won't be captured)
             try:
                 payment.fail(info={"state": TransactionState.VOIDED.value})
-                logger.info(
-                    "Payment %s marked as failed after void",
-                    payment.pk,
-                )
+                logger.info("Payment %s marked as failed after void", payment.pk)
             except Exception as e:
                 logger.exception(
                     "Error failing payment %s after void: %s",
@@ -1084,147 +1244,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         except Exception as e:
             logger.exception(
                 "Unexpected error voiding transaction %s: %s",
-                transaction_id,
-                e,
-            )
-            return (False, str(_("Unexpected error: {error}").format(error=str(e))))
-
-    def execute_refund(
-        self, payment: OrderPayment, amount: Decimal | None = None
-    ) -> tuple[bool, str | None]:
-        """
-        Refund a completed transaction.
-
-        This method is called from the refund view to create a full or partial
-        refund for a transaction that is in the COMPLETED or FULFILL state.
-
-        Args:
-            payment: The OrderPayment to refund.
-            amount: Optional refund amount. If not provided, refunds the
-                remaining refundable amount (full refund if no prior refunds).
-
-        Returns:
-            A tuple of (success: bool, error_message: Optional[str]).
-            On success, error_message is None.
-            On failure, error_message contains the error description.
-        """
-        import uuid
-
-        info_data = payment.info_data or {}
-        transaction_id = info_data.get("transaction_id")
-
-        if not transaction_id:
-            return (False, str(_("Transaction ID not found.")))
-
-        # Check if transaction is in a refundable state (COMPLETED or FULFILL)
-        current_state = info_data.get("state")
-        refundable_states = {
-            TransactionState.COMPLETED.value,
-            TransactionState.FULFILL.value,
-        }
-        if current_state not in refundable_states:
-            return (
-                False,
-                str(
-                    _("Transaction cannot be refunded. Current state: {state}").format(
-                        state=current_state or "Unknown"
-                    )
-                ),
-            )
-
-        # Calculate refundable amount
-        original_amount = payment.amount
-        total_refunded = Decimal(str(info_data.get("total_refunded_amount", 0)))
-        remaining_refundable = original_amount - total_refunded
-
-        if remaining_refundable <= Decimal("0"):
-            return (
-                False,
-                str(_("Transaction has already been fully refunded.")),
-            )
-
-        # Determine refund amount
-        refund_amount = remaining_refundable if amount is None else amount
-
-        # Validate refund amount
-        if refund_amount <= Decimal("0"):
-            return (
-                False,
-                str(_("Refund amount must be greater than zero.")),
-            )
-
-        if refund_amount > remaining_refundable:
-            return (
-                False,
-                str(
-                    _(
-                        "Refund amount ({refund_amount}) exceeds remaining "
-                        "refundable amount ({remaining})."
-                    ).format(
-                        refund_amount=refund_amount,
-                        remaining=remaining_refundable,
-                    )
-                ),
-            )
-
-        try:
-            client = self._get_client()
-
-            # Generate a unique external ID for idempotency
-            external_id = f"pretix-refund-{payment.pk}-{uuid.uuid4().hex[:8]}"
-            merchant_reference = f"pretix-{self.event.slug}-{payment.order.code}"
-
-            refund = client.refund_transaction(
-                transaction_id=int(transaction_id),
-                external_id=external_id,
-                merchant_reference=merchant_reference,
-                amount=float(refund_amount),
-            )
-
-            # Update total refunded amount
-            actual_refund_amount = float(refund.amount) if refund.amount else float(refund_amount)
-            new_total_refunded = float(total_refunded) + actual_refund_amount
-
-            # Build refund history entry
-            refund_entry = {
-                "refund_id": refund.id,
-                "refund_state": refund.state.value if refund.state else None,
-                "refund_amount": actual_refund_amount,
-                "refund_date": str(refund.created_on) if refund.created_on else None,
-            }
-
-            # Get or create refund history list
-            refund_history = info_data.get("refund_history", [])
-            refund_history.append(refund_entry)
-
-            # Update payment info with refund details
-            info_data["refund_history"] = refund_history
-            info_data["total_refunded_amount"] = new_total_refunded
-            payment.info_data = info_data
-            payment.save(update_fields=["info"])
-
-            logger.info(
-                "PostFinance refund %s created successfully for payment %s "
-                "(transaction %s, amount %s, total refunded %s)",
-                refund.id,
-                payment.pk,
-                transaction_id,
-                actual_refund_amount,
-                new_total_refunded,
-            )
-
-            return (True, None)
-
-        except PostFinanceError as e:
-            logger.exception(
-                "PostFinance API error refunding transaction %s: %s",
-                transaction_id,
-                e,
-            )
-            return (False, str(_("Refund failed: {error}").format(error=str(e))))
-        except Exception as e:
-            logger.exception(
-                "Unexpected error refunding transaction %s: %s",
                 transaction_id,
                 e,
             )

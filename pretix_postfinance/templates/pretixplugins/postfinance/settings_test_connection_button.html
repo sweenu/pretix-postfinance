@@ -1,0 +1,43 @@
+<div class="form-group">
+    <label class="col-md-3 control-label">{label}</label>
+    <div class="col-md-9">
+        <button type="button" class="btn btn-default" id="postfinance-test-connection">
+            {button_text}
+        </button>
+        <span id="postfinance-test-result" style="margin-left: 10px;"></span>
+    </div>
+</div>
+<script>
+(function() {{
+    var btn = document.getElementById('postfinance-test-connection');
+    var result = document.getElementById('postfinance-test-result');
+    btn.addEventListener('click', function() {{
+        btn.disabled = true;
+        btn.textContent = '{testing_text}';
+        result.textContent = '';
+        result.className = '';
+
+        fetch('{test_url}', {{
+            method: 'POST',
+            headers: {{
+                'X-CSRFToken': '{csrf_token}',
+                'Content-Type': 'application/json'
+            }},
+            credentials: 'same-origin'
+        }})
+        .then(function(response) {{ return response.json(); }})
+        .then(function(data) {{
+            btn.disabled = false;
+            btn.textContent = '{button_text}';
+            result.textContent = data.message;
+            result.style.color = data.success ? 'green' : 'red';
+        }})
+        .catch(function(error) {{
+            btn.disabled = false;
+            btn.textContent = '{button_text}';
+            result.textContent = '{error_text}';
+            result.style.color = 'red';
+        }});
+    }});
+}})();
+</script>
