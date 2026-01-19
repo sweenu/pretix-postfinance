@@ -1,21 +1,18 @@
-# Claude Development Guide
+# Development Guide
 
-This document helps Claude understand the pretix-postfinance project structure and development workflow.
+This document helps AI agents understand the pretix-postfinance project structure and development workflow.
 
 ## Project Overview
 
-PostFinance Checkout payment plugin for pretix. Follows a PRD-based development approach with progress tracked in `prd.json` and `progress.txt`.
+PostFinance Checkout payment plugin for pretix.
 
 ## Key Files
 
 - **`pretix_postfinance/payment.py`**: Main payment provider (BasePaymentProvider subclass)
 - **`pretix_postfinance/views.py`**: Admin views for capture/refund + webhook handler
 - **`pretix_postfinance/api.py`**: PostFinance Checkout SDK wrapper
-- **`pretix_postfinance/utils.py`**: Currency conversion utilities
 - **`pretix_postfinance/_types.py`**: Type definitions for pretix-specific types
-- **`tests/`**: pytest test suite with 38 tests
-- **`prd.json`**: Product Requirements Document
-- **`progress.txt`**: Development progress tracking
+- **`tests/`**: pytest test suite
 
 ## Architecture
 
@@ -58,13 +55,12 @@ uv run pytest tests/ --cov=pretix_postfinance --cov-report=term-missing -v
 
 - Unit tests for API client and utilities
 - Mocked PostFinance SDK services
-- 38 tests covering error handling, client initialization, currency conversion
 - Coverage reporting in CI with diff on PRs
 
 ## CI/CD
 
 GitHub workflow runs on PRs:
-- **test**: pytest with coverage (Python 3.9-3.12)
+- **test**: pytest with coverage (Python 3.9-3.14)
 - **coverage-diff**: Shows coverage change in PR comments
 - **typecheck**: mypy strict type checking
 - **lint**: ruff linting

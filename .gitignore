@@ -67,3 +67,6 @@ target/
 
 # Nix
 result
+
+# Editor
+.zed
