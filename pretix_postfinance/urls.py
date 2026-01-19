@@ -3,56 +3,24 @@ URL configuration for PostFinance payment plugin.
 """
 
 from django.urls import path, re_path
-from pretix.multidomain import event_url
 
 from . import views
 
-# Event-specific URL patterns (include organizer and event in the path)
-event_patterns = [
-    event_url(
-        r"^postfinance/return/(?P<order>[^/]+)/(?P<payment>\d+)/(?P<hash>[^/]+)/$",
-        views.PostFinanceReturnView.as_view(),
-        name="postfinance.return",
-    ),
-]
+# No customer-facing event patterns needed - PostFinance redirects
+# back to pretix checkout steps directly
+event_patterns = []
 
-# Global URL patterns (including control panel admin views)
-# Registered under the plugins:pretix_postfinance: namespace
 urlpatterns = [
-    path(
-        "_postfinance/webhook/",
-        views.PostFinanceWebhookView.as_view(),
-        name="postfinance.webhook",
-    ),
-    # Control panel test connection view (admin-only)
-    # URL: /control/event/<organizer>/<event>/postfinance/test-connection/
+    path("_postfinance/webhook/", views.webhook, name="postfinance.webhook"),
     re_path(
         r"^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/postfinance/test-connection/$",
         views.PostFinanceTestConnectionView.as_view(),
         name="postfinance.test_connection",
     ),
-    # Control panel capture view (admin-only)
-    # URL: /control/event/<organizer>/<event>/postfinance/capture/<order>/<payment>/
     re_path(
         r"^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/postfinance/capture/"
         r"(?P<order>[^/]+)/(?P<payment>\d+)/$",
         views.PostFinanceCaptureView.as_view(),
         name="postfinance.capture",
-    ),
-    # Control panel void view (admin-only)
-    # URL: /control/event/<organizer>/<event>/postfinance/void/<order>/<payment>/
-    re_path(
-        r"^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/postfinance/void/"
-        r"(?P<order>[^/]+)/(?P<payment>\d+)/$",
-        views.PostFinanceVoidView.as_view(),
-        name="postfinance.void",
-    ),
-    # Control panel refund view (admin-only)
-    # URL: /control/event/<organizer>/<event>/postfinance/refund/<order>/<payment>/
-    re_path(
-        r"^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/postfinance/refund/"
-        r"(?P<order>[^/]+)/(?P<payment>\d+)/$",
-        views.PostFinanceRefundView.as_view(),
-        name="postfinance.refund",
     ),
 ]

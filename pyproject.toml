@@ -87,6 +87,7 @@ plugins = ["mypy_django_plugin.main"]
 module = [
     "pretix.*",
     "postfinancecheckout.*",
+    "django_scopes",
 ]
 ignore_missing_imports = true
 
@@ -120,15 +121,17 @@ ignore = [
 "pretix_postfinance/*.py" = ["ARG002"]
 # Django signals require sender and kwargs arguments
 "pretix_postfinance/signals.py" = ["ARG001"]
-# conftest.py needs imports after django.setup()
-"tests/conftest.py" = ["E402"]
+# Test files: unused args in mocks/fixtures, unused vars from unpacking, long URLs
+"tests/*.py" = ["ARG001", "ARG005", "E402", "F841", "RUF059"]
 
 [tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["pretix_postfinance"]

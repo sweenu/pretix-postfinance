@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 import logging
-import uuid
 from collections import OrderedDict
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -13,8 +13,6 @@ from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
-from i18nfield.forms import I18nFormField
-from i18nfield.strings import LazyI18nString
 from postfinancecheckout.models import (
     LineItemCreate,
     LineItemType,
@@ -86,7 +84,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         If a custom display name is configured in event settings, use that.
         Otherwise fall back to the default verbose name.
         """
-        return str(self.settings.get("public_name", as_type=LazyI18nString or self.verbose_name))
+        return str(self.settings.get("public_name")) or self.verbose_name
 
     @property
     def settings_form_fields(self) -> OrderedDict:
@@ -150,7 +148,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 ),
                 (
                     "public_name",
-                    I18nFormField(
+                    forms.CharField(
                         label=_("Display Name"),
                         help_text=_(
                             "Custom name shown to customers during checkout. "
@@ -220,7 +218,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 "event": self.event.slug,
             },
         )
-        template = get_template("pretixplugins/postfinance/settings_test_connection_button.html")
+        template = get_template("postfinance/settings_test_connection_button.html")
         ctx = {
             "label": _("Connection Test"),
             "button_text": _("Test Connection"),
@@ -735,19 +733,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     )
                 )
 
-        # Show capture and void buttons for AUTHORIZED transactions
+        # Show capture button for AUTHORIZED transactions (manual capture mode)
+        # Void is handled via pretix's cancel_payment mechanism
         if state == TransactionState.AUTHORIZED.value:
             capture_url = reverse(
                 "plugins:pretix_postfinance:postfinance.capture",
-                kwargs={
-                    "organizer": self.event.organizer.slug,
-                    "event": self.event.slug,
-                    "order": payment.order.code,
-                    "payment": payment.pk,
-                },
-            )
-            void_url = reverse(
-                "plugins:pretix_postfinance:postfinance.void",
                 kwargs={
                     "organizer": self.event.organizer.slug,
                     "event": self.event.slug,
@@ -763,123 +753,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     '<button type="submit" class="btn btn-primary btn-sm">'
                     "{capture_text}"
                     "</button>"
-                    "</form>"
-                    "&nbsp;"
-                    '<form action="{void_url}" method="POST" '
-                    'style="margin-top: 10px; display: inline-block;">'
-                    '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
-                    '<button type="submit" class="btn btn-danger btn-sm">'
-                    "{void_text}"
-                    "</button>"
                     "</form>",
                     capture_url=capture_url,
-                    void_url=void_url,
                     csrf=request.META.get("CSRF_COOKIE", ""),
                     capture_text=_("Capture Payment"),
-                    void_text=_("Void Payment"),
                 )
             )
 
-        # Show refund section for COMPLETED or FULFILL transactions
-        refundable_states = {
-            TransactionState.COMPLETED.value,
-            TransactionState.FULFILL.value,
-        }
-        if state in refundable_states:
-            # Calculate remaining refundable amount
-            original_amount = payment.amount
-            total_refunded = Decimal(str(info_data.get("total_refunded_amount", 0)))
-            remaining_refundable = original_amount - total_refunded
-
-            # Show total refunded amount if any refunds have been made
-            if total_refunded > Decimal("0"):
-                parts.append(
-                    format_html(
-                        "<strong>{label}:</strong> {value} {currency}",
-                        label=_("Total Refunded"),
-                        value=total_refunded,
-                        currency=payment.order.event.currency,
-                    )
-                )
-                parts.append(
-                    format_html(
-                        "<strong>{label}:</strong> {value} {currency}",
-                        label=_("Remaining Refundable"),
-                        value=remaining_refundable,
-                        currency=payment.order.event.currency,
-                    )
-                )
-
-            # Show refund history if any
-            refund_history = info_data.get("refund_history", [])
-            if refund_history:
-                parts.append(format_html("<strong>{label}:</strong>", label=_("Refund History")))
-                for i, entry in enumerate(refund_history, 1):
-                    refund_id = entry.get("refund_id")
-                    refund_state = entry.get("refund_state", "")
-                    refund_amount = entry.get("refund_amount", 0)
-                    refund_date = entry.get("refund_date", "")
-                    if refund_date:
-                        parts.append(
-                            format_html(
-                                "&nbsp;&nbsp;{num}. ID: {id}, Amount: {amount} {currency}, "
-                                "State: {state}, Date: {date}",
-                                num=i,
-                                id=refund_id,
-                                amount=refund_amount,
-                                currency=payment.order.event.currency,
-                                state=refund_state,
-                                date=refund_date,
-                            )
-                        )
-                    else:
-                        parts.append(
-                            format_html(
-                                "&nbsp;&nbsp;{num}. ID: {id}, Amount: {amount} {currency}, "
-                                "State: {state}",
-                                num=i,
-                                id=refund_id,
-                                amount=refund_amount,
-                                currency=payment.order.event.currency,
-                                state=refund_state,
-                            )
-                        )
-
-            # Show refund form if there's still refundable amount
-            if remaining_refundable > Decimal("0"):
-                refund_url = reverse(
-                    "plugins:pretix_postfinance:postfinance.refund",
-                    kwargs={
-                        "organizer": self.event.organizer.slug,
-                        "event": self.event.slug,
-                        "order": payment.order.code,
-                        "payment": payment.pk,
-                    },
-                )
-                parts.append(
-                    format_html(
-                        '<form action="{refund_url}" method="POST" style="margin-top: 10px;">'
-                        '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
-                        '<div style="margin-bottom: 5px;">'
-                        '<label for="refund_amount">{amount_label}:</label> '
-                        '<input type="number" name="amount" id="refund_amount" '
-                        'step="0.01" min="0.01" max="{max_amount}" '
-                        'placeholder="{max_amount}" '
-                        'style="width: 100px; margin-right: 5px;"> '
-                        "{currency}"
-                        "</div>"
-                        '<button type="submit" class="btn btn-warning btn-sm">'
-                        "{refund_text}"
-                        "</button>"
-                        "</form>",
-                        refund_url=refund_url,
-                        csrf=request.META.get("CSRF_COOKIE", ""),
-                        amount_label=_("Refund Amount"),
-                        max_amount=remaining_refundable,
-                        currency=payment.order.event.currency,
-                        refund_text=_("Refund Payment"),
-                    )
-                )
+        # Refunds are handled via pretix's built-in refund UI since we implement
+        # payment_refund_supported() and payment_partial_refund_supported()
 
         if parts:
             return "<br>".join(parts)
@@ -949,86 +831,43 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 )
             )
 
-        # Calculate refundable amount
-        original_amount = payment.amount
-        total_refunded = Decimal(str(info_data.get("total_refunded_amount", 0)))
-        remaining_refundable = original_amount - total_refunded
-
-        if remaining_refundable <= Decimal("0"):
-            raise PaymentException(_("Transaction has already been fully refunded."))
-
-        refund_amount = refund.amount
-
-        # Validate refund amount
-        if refund_amount <= Decimal("0"):
-            raise PaymentException(_("Refund amount must be greater than zero."))
-
-        if refund_amount > remaining_refundable:
-            raise PaymentException(
-                _(
-                    "Refund amount ({refund_amount}) exceeds remaining "
-                    "refundable amount ({remaining})."
-                ).format(
-                    refund_amount=refund_amount,
-                    remaining=remaining_refundable,
-                )
-            )
-
         try:
             client = self._get_client()
 
             # Generate a unique external ID for idempotency
-            external_id = f"pretix-refund-{payment.pk}-{uuid.uuid4().hex[:8]}"
-            merchant_reference = f"pretix-{self.event.slug}-{payment.order.code}"
+            external_id = f"pretix-refund-{refund.order.code}-R-{refund.local_id}"
+            merchant_reference = f"pretix-{self.event.slug}-{refund.order.code}-R-{refund.local_id}"
 
             postfinance_refund = client.refund_transaction(
                 transaction_id=int(transaction_id),
                 external_id=external_id,
                 merchant_reference=merchant_reference,
-                amount=float(refund_amount),
+                amount=float(refund.amount),
             )
 
-            # Update total refunded amount
-            actual_refund_amount = (
-                float(postfinance_refund.amount)
-                if postfinance_refund.amount
-                else float(refund_amount)
+            # Store refund info on the OrderRefund object
+            refund.info = json.dumps(
+                {
+                    "refund_id": postfinance_refund.id,
+                    "state": postfinance_refund.state.value if postfinance_refund.state else None,
+                    "amount": float(postfinance_refund.amount)
+                    if postfinance_refund.amount
+                    else None,
+                    "created_on": str(postfinance_refund.created_on)
+                    if postfinance_refund.created_on
+                    else None,
+                }
             )
-            new_total_refunded = float(total_refunded) + actual_refund_amount
+            refund.save(update_fields=["info"])
 
-            # Build refund history entry
-            refund_entry = {
-                "refund_id": postfinance_refund.id,
-                "refund_state": (
-                    postfinance_refund.state.value if postfinance_refund.state else None
-                ),
-                "refund_amount": actual_refund_amount,
-                "refund_date": (
-                    str(postfinance_refund.created_on) if postfinance_refund.created_on else None
-                ),
-            }
-
-            # Get or create refund history list
-            refund_history = info_data.get("refund_history", [])
-            refund_history.append(refund_entry)
-
-            # Update payment info with refund details
-            info_data["refund_history"] = refund_history
-            info_data["total_refunded_amount"] = new_total_refunded
-            payment.info_data = info_data
-            payment.save(update_fields=["info"])
-
-            # Mark refund as done in pretix
+            # Mark refund as done
             refund.done()
 
             logger.info(
-                "PostFinance refund %s created successfully for payment %s "
-                "(transaction %s, amount %s, total refunded %s)",
+                "PostFinance refund %s created for payment %s (amount %s)",
                 postfinance_refund.id,
                 payment.pk,
-                transaction_id,
-                actual_refund_amount,
-                new_total_refunded,
+                refund.amount,
             )
 
         except PostFinanceError as e:
@@ -1038,13 +877,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 e,
             )
             raise PaymentException(_("Refund failed: {error}").format(error=str(e))) from e
-        except Exception as e:
-            logger.exception(
-                "Unexpected error refunding transaction %s: %s",
-                transaction_id,
-                e,
-            )
-            raise PaymentException(_("Unexpected error: {error}").format(error=str(e))) from e
 
     def api_payment_details(self, payment: OrderPayment) -> dict:
         """
@@ -1069,16 +901,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Return the refund ID for matching with external records.
         """
-        payment = refund.payment
-        info_data = payment.info_data or {}
-        refund_history = info_data.get("refund_history", [])
-
-        # Find the last refund entry that matches this refund amount
-        for entry in reversed(refund_history):
-            if Decimal(str(entry.get("refund_amount", 0))) == refund.amount:
-                return str(entry.get("refund_id"))
-
-        return None
+        info_data = refund.info_data or {}
+        refund_id = info_data.get("refund_id")
+        return str(refund_id) if refund_id else None
 
     def shred_payment_info(self, obj: OrderPayment | OrderRefund) -> None:
         """

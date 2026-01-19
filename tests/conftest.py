@@ -2,24 +2,45 @@
 Pytest fixtures and configuration for pretix-postfinance tests.
 """
 
+import inspect
 import os
-import sys
 
-# Set testing environment before any imports
+# Set testing environment
 os.environ["PRETIX_POSTFINANCE_TESTING"] = "1"
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.settings")
-
-# Add tests directory to path for settings import
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import django
-
-django.setup()
-
-from decimal import Decimal
-from unittest.mock import MagicMock
 
 import pytest
+from django.utils import translation
+from django_scopes import scopes_disabled
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    """
+    This hack automatically disables django-scopes for all fixtures which are not yield fixtures.
+    This saves us a *lot* of decorators.
+    """
+    if inspect.isgeneratorfunction(fixturedef.func):
+        yield
+    else:
+        with scopes_disabled():
+            yield
+
+
+@pytest.fixture(autouse=True)
+def reset_locale():
+    """Reset locale to English for each test."""
+    translation.activate("en")
+
+
+@pytest.fixture(autouse=True)
+def no_messages(monkeypatch):
+    """Patch out messages for performance improvements."""
+    monkeypatch.setattr("django.contrib.messages.api.add_message", lambda *args, **kwargs: None)
+
+
+# Mock fixtures for API tests
+from decimal import Decimal
+from unittest.mock import MagicMock
 
 
 @pytest.fixture
