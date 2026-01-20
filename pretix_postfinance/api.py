@@ -17,13 +17,19 @@ from postfinancecheckout.models import (
     PaymentMethodConfiguration,
     Refund,
     RefundCreate,
+    RefundState,
     RefundType,
     Space,
     Transaction,
     TransactionCompletion,
     TransactionCompletionBehavior,
     TransactionCreate,
+    TransactionState,
     TransactionVoid,
+    WebhookListener,
+    WebhookListenerCreate,
+    WebhookUrl,
+    WebhookUrlCreate,
 )
 from postfinancecheckout.postfinancecheckout_sdk_exception import (
     PostFinanceCheckoutSdkException,
@@ -34,6 +40,8 @@ from postfinancecheckout.service import (
     SpacesService,
     TransactionsService,
     WebhookEncryptionKeysService,
+    WebhookListenersService,
+    WebhookURLsService,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +107,8 @@ class PostFinanceClient:
         self._payment_method_configs_service = PaymentMethodConfigurationsService(
             self._configuration
         )
+        self._webhook_url_service = WebhookURLsService(self._configuration)
+        self._webhook_listener_service = WebhookListenersService(self._configuration)
 
     def get_space(self) -> Space:
         """
@@ -462,3 +472,253 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error validating webhook signature: %s", e)
             raise PostFinanceError(message=str(e)) from e
+
+    def get_webhook_urls(self) -> list[WebhookUrl]:
+        """
+        Get all webhook URLs configured for this space.
+
+        Returns:
+            List of WebhookUrl objects.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        try:
+            response = self._webhook_url_service.get_webhooks_urls(
+                space=self.space_id,
+                limit=100,
+            )
+            return response.data or []
+        except ApiException as e:
+            logger.error("PostFinance API error getting webhook URLs: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting webhook URLs: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def create_webhook_url(self, name: str, url: str) -> WebhookUrl:
+        """
+        Create a new webhook URL.
+
+        Args:
+            name: A name for this webhook URL configuration.
+            url: The URL where webhooks will be sent.
+
+        Returns:
+            The created WebhookUrl object.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        webhook_url_create = WebhookUrlCreate(
+            name=name,
+            url=url,
+            state=CreationEntityState.ACTIVE,
+        )
+
+        try:
+            return self._webhook_url_service.post_webhooks_urls(
+                space=self.space_id,
+                webhook_url_create=webhook_url_create,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error creating webhook URL: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error creating webhook URL: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def get_webhook_listeners(self) -> list[WebhookListener]:
+        """
+        Get all webhook listeners configured for this space.
+
+        Returns:
+            List of WebhookListener objects.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        try:
+            response = self._webhook_listener_service.get_webhooks_listeners(
+                space=self.space_id,
+                limit=100,
+            )
+            return response.data or []
+        except ApiException as e:
+            logger.error("PostFinance API error getting webhook listeners: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting webhook listeners: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def create_webhook_listener(
+        self,
+        name: str,
+        webhook_url_id: int,
+        entity_id: int,
+        entity_states: list[str],
+    ) -> WebhookListener:
+        """
+        Create a new webhook listener.
+
+        Args:
+            name: A name for this webhook listener.
+            webhook_url_id: The ID of the webhook URL to use.
+            entity_id: The entity type ID to listen for.
+                Common values: 1472041829003 (Transaction), 1472041816898 (Refund)
+            entity_states: List of entity state names to trigger on
+                (e.g., ["AUTHORIZED", "COMPLETED"]).
+
+        Returns:
+            The created WebhookListener object.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        webhook_listener_create = WebhookListenerCreate(
+            name=name,
+            url=webhook_url_id,
+            entity=entity_id,
+            entityStates=entity_states,
+            state=CreationEntityState.ACTIVE,
+        )
+
+        try:
+            return self._webhook_listener_service.post_webhooks_listeners(
+                space=self.space_id,
+                webhook_listener_create=webhook_listener_create,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error creating webhook listener: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error creating webhook listener: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def setup_webhooks(self, webhook_url: str) -> dict[str, int | None]:
+        """
+        Set up webhooks for Transaction and Refund state changes.
+
+        This is a convenience method that:
+        1. Creates a webhook URL (or finds an existing one with the same URL)
+        2. Creates webhook listeners for Transaction and Refund entities
+
+        Args:
+            webhook_url: The URL where webhooks will be sent.
+
+        Returns:
+            A dict with keys 'webhook_url_id', 'transaction_listener_id',
+            and 'refund_listener_id'.
+
+        Raises:
+            PostFinanceError: If any API request fails.
+        """
+        # PostFinance entity IDs (these are fixed IDs in PostFinance's system)
+        TRANSACTION_ENTITY_ID = 1472041829003
+        REFUND_ENTITY_ID = 1472041816898
+
+        # Transaction states we care about (all major state changes)
+        TRANSACTION_STATES = [
+            TransactionState.AUTHORIZED.value,
+            TransactionState.COMPLETED.value,
+            TransactionState.FULFILL.value,
+            TransactionState.FAILED.value,
+            TransactionState.DECLINE.value,
+            TransactionState.VOIDED.value,
+            TransactionState.CONFIRMED.value,
+            TransactionState.PROCESSING.value,
+        ]
+
+        # Refund states we care about
+        REFUND_STATES = [
+            RefundState.SUCCESSFUL.value,
+            RefundState.FAILED.value,
+        ]
+
+        result: dict[str, int | None] = {
+            "webhook_url_id": None,
+            "transaction_listener_id": None,
+            "refund_listener_id": None,
+        }
+
+        # Check if a webhook URL with this URL already exists
+        existing_urls = self.get_webhook_urls()
+        webhook_url_obj = None
+        for existing in existing_urls:
+            if existing.url == webhook_url and existing.state == CreationEntityState.ACTIVE:
+                webhook_url_obj = existing
+                logger.info("Found existing webhook URL with ID %s", existing.id)
+                break
+
+        # Create webhook URL if it doesn't exist
+        if not webhook_url_obj:
+            webhook_url_obj = self.create_webhook_url(
+                name="pretix PostFinance Plugin",
+                url=webhook_url,
+            )
+            logger.info("Created webhook URL with ID %s", webhook_url_obj.id)
+
+        if not webhook_url_obj.id:
+            raise PostFinanceError("Failed to get webhook URL ID")
+
+        result["webhook_url_id"] = webhook_url_obj.id
+
+        # Check existing listeners to avoid duplicates
+        existing_listeners = self.get_webhook_listeners()
+        has_transaction_listener = False
+        has_refund_listener = False
+
+        for listener in existing_listeners:
+            listener_url_id = listener.url.id if listener.url else None
+            if (
+                listener_url_id == webhook_url_obj.id
+                and listener.state == CreationEntityState.ACTIVE
+            ):
+                if listener.entity == TRANSACTION_ENTITY_ID:
+                    has_transaction_listener = True
+                    result["transaction_listener_id"] = listener.id
+                    logger.info("Found existing transaction listener with ID %s", listener.id)
+                elif listener.entity == REFUND_ENTITY_ID:
+                    has_refund_listener = True
+                    result["refund_listener_id"] = listener.id
+                    logger.info("Found existing refund listener with ID %s", listener.id)
+
+        # Create Transaction listener if it doesn't exist
+        if not has_transaction_listener:
+            transaction_listener = self.create_webhook_listener(
+                name="pretix Transaction Updates",
+                webhook_url_id=webhook_url_obj.id,
+                entity_id=TRANSACTION_ENTITY_ID,
+                entity_states=TRANSACTION_STATES,
+            )
+            result["transaction_listener_id"] = transaction_listener.id
+            logger.info("Created transaction listener with ID %s", transaction_listener.id)
+
+        # Create Refund listener if it doesn't exist
+        if not has_refund_listener:
+            refund_listener = self.create_webhook_listener(
+                name="pretix Refund Updates",
+                webhook_url_id=webhook_url_obj.id,
+                entity_id=REFUND_ENTITY_ID,
+                entity_states=REFUND_STATES,
+            )
+            result["refund_listener_id"] = refund_listener.id
+            logger.info("Created refund listener with ID %s", refund_listener.id)
+
+        return result

@@ -1,10 +1,14 @@
 {% load i18n %}
 
 <div class="alert alert-info">
-    {% blocktrans with url=webhook_url trimmed %} Please configure a webhook in
-    your PostFinance Checkout space to the following endpoint in order to
-    automatically update payment states: <code>{{ url }}</code>
+    {% blocktrans with url=webhook_url trimmed %} A webhook must be configured
+    in your PostFinance Checkout space to the following endpoint for automatic
+    payment status updates:
+    <code>{{ url }}</code>
     {% endblocktrans %}
+    <br /><br />
+    {% trans "You can set this up automatically using the button below, or
+    configure it manually in your PostFinance Checkout dashboard." %}
 </div>
 
 <div class="form-group">
@@ -19,5 +23,25 @@
             {% trans "Test Connection" %}
         </button>
         <span id="postfinance-test-result"></span>
+    </div>
+</div>
+
+<div class="form-group">
+    <label class="col-md-3 control-label">{% trans "Webhook Setup" %}</label>
+    <div class="col-md-9">
+        <button
+            type="button"
+            class="btn btn-default"
+            id="postfinance-setup-webhooks"
+            data-setup-url="{{ setup_webhooks_url }}"
+        >
+            {% trans "Setup Webhooks Automatically" %}
+        </button>
+        <span id="postfinance-setup-result"></span>
+        <p class="help-block">
+            {% trans "This will create the necessary webhook URL and listeners
+            in your PostFinance Checkout space. If they already exist, they will
+            be reused." %}
+        </p>
     </div>
 </div>

@@ -281,7 +281,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Render additional content below the settings form.
 
         Shows webhook URL and adds a "Test Connection" button that validates
-        the configured PostFinance credentials via AJAX.
+        the configured PostFinance credentials via AJAX, and a "Setup Webhooks"
+        button to automatically configure webhooks in PostFinance.
         """
         template = get_template("pretixplugins/postfinance/control_settings.html")
         ctx = {
@@ -291,6 +292,13 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             ),
             "test_url": reverse(
                 "plugins:pretix_postfinance:postfinance.test_connection",
+                kwargs={
+                    "organizer": self.event.organizer.slug,
+                    "event": self.event.slug,
+                },
+            ),
+            "setup_webhooks_url": reverse(
+                "plugins:pretix_postfinance:postfinance.setup_webhooks",
                 kwargs={
                     "organizer": self.event.organizer.slug,
                     "event": self.event.slug,

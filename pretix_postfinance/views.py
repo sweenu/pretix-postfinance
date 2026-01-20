@@ -299,6 +299,73 @@ class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):
         return JsonResponse({"success": success, "message": message})
 
 
+class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
+    """AJAX endpoint for setting up PostFinance webhooks automatically."""
+
+    permission = "can_change_event_settings"
+
+    def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        providers = request.event.get_payment_providers()
+        provider = providers.get("postfinance")
+
+        if not provider:
+            return JsonResponse(
+                {
+                    "success": False,
+                    "message": str(_("PostFinance payment provider not found.")),
+                }
+            )
+
+        space_id = provider.settings.get("space_id")
+        user_id = provider.settings.get("user_id")
+        api_secret = provider.settings.get("api_secret")
+
+        if not all([space_id, user_id, api_secret]):
+            return JsonResponse(
+                {
+                    "success": False,
+                    "message": str(
+                        _(
+                            "Please configure Space ID, User ID, and API Secret before "
+                            "setting up webhooks."
+                        )
+                    ),
+                }
+            )
+
+        from pretix.helpers.urls import build_absolute_uri as build_global_uri
+
+        webhook_url = build_global_uri("plugins:pretix_postfinance:postfinance.webhook")
+
+        try:
+            client = PostFinanceClient(
+                space_id=int(space_id),
+                user_id=int(user_id),
+                api_secret=str(api_secret),
+            )
+            result = client.setup_webhooks(webhook_url)
+
+            return JsonResponse(
+                {
+                    "success": True,
+                    "message": str(
+                        _(
+                            "Webhooks configured successfully! "
+                            "Transaction and refund updates will now be received automatically."
+                        )
+                    ),
+                    "details": result,
+                }
+            )
+        except PostFinanceError as e:
+            return JsonResponse(
+                {
+                    "success": False,
+                    "message": str(_("Failed to setup webhooks: {error}").format(error=str(e))),
+                }
+            )
+
+
 class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
     """Handle manual capture requests for AUTHORIZED payments."""
 
