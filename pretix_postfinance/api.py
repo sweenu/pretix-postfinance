@@ -8,7 +8,6 @@ for use with the pretix payment plugin.
 from __future__ import annotations
 
 import logging
-from typing import Literal
 
 from postfinancecheckout import Configuration
 from postfinancecheckout.exceptions import ApiException
@@ -63,8 +62,6 @@ class PostFinanceClient:
         space_id: The PostFinance space ID.
         user_id: The PostFinance user ID for authentication.
         api_secret: The API secret (authentication key).
-        environment: Either 'sandbox' or 'production' (for reference only,
-            SDK uses same endpoint for both).
     """
 
     DEFAULT_TIMEOUT = 30  # seconds
@@ -74,7 +71,6 @@ class PostFinanceClient:
         space_id: int,
         user_id: int,
         api_secret: str,
-        environment: Literal["sandbox", "production"] = "production",
     ) -> None:
         """
         Initialize the PostFinance API client.
@@ -83,14 +79,10 @@ class PostFinanceClient:
             space_id: The PostFinance space ID.
             user_id: The PostFinance user ID for authentication.
             api_secret: The API secret (authentication key).
-            environment: Either 'sandbox' or 'production'. Defaults to 'production'.
-                Note: Both use the same API endpoint; environment is determined
-                by space configuration.
         """
         self.space_id = space_id
         self.user_id = user_id
         self.api_secret = api_secret
-        self.environment = environment
 
         self._configuration = Configuration(
             user_id=user_id,

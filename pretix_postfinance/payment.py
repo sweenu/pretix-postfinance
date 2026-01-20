@@ -132,21 +132,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     ),
                 ),
                 (
-                    "environment",
-                    forms.ChoiceField(
-                        label=_("Environment"),
-                        help_text=_(
-                            "Select 'Sandbox' for testing or 'Production' for live payments. "
-                        ),
-                        choices=[
-                            ("sandbox", _("Sandbox (Testing)")),
-                            ("production", _("Production (Live)")),
-                        ],
-                        initial="sandbox",
-                        required=True,
-                    ),
-                ),
-                (
                     "public_name",
                     forms.CharField(
                         label=_("Display Name"),
@@ -237,7 +222,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             space_id=int(self.settings.get("space_id", 0)),
             user_id=int(self.settings.get("user_id", 0)),
             api_secret=str(self.settings.get("api_secret", "")),
-            environment=self.settings.get("environment", "sandbox"),
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -657,14 +641,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         if transaction_id:
             # Build link to PostFinance dashboard
             space_id = self.settings.get("space_id")
-            environment = self.settings.get("environment", "sandbox")
             if space_id:
-                if environment == "production":
-                    dashboard_base = "https://checkout.postfinance.ch"
-                else:
-                    dashboard_base = "https://checkout.sandbox.postfinance.ch"
                 dashboard_url = (
-                    f"{dashboard_base}/s/{space_id}/payment/transaction/view/{transaction_id}"
+                    f"https://checkout.postfinance.ch/s/{space_id}"
+                    f"/payment/transaction/view/{transaction_id}"
                 )
                 parts.append(
                     format_html(

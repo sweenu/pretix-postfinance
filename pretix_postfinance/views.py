@@ -107,7 +107,6 @@ def _get_client_for_space(space_id: int) -> PostFinanceClient | None:
                 space_id=int(configured_space),
                 user_id=int(gs.get("payment_postfinance_user_id", 0)),
                 api_secret=str(gs.get("payment_postfinance_api_secret", "")),
-                environment=gs.get("payment_postfinance_environment", "sandbox"),
             )
     except Exception as e:
         logger.debug("Could not check global settings: %s", e)
@@ -121,7 +120,6 @@ def _get_client_for_space(space_id: int) -> PostFinanceClient | None:
                     space_id=int(event_space_id),
                     user_id=int(es.get("payment_postfinance_user_id", 0)),
                     api_secret=str(es.get("payment_postfinance_api_secret", "")),
-                    environment=es.get("payment_postfinance_environment", "sandbox"),
                 )
         except Exception as e:
             logger.debug("Could not check event %s settings: %s", event.slug, e)

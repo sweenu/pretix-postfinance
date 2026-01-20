@@ -50,7 +50,6 @@ def mock_postfinance_config():
         "space_id": "12345",
         "user_id": "67890",
         "api_secret": "test-secret-key",
-        "environment": "sandbox",
     }
 
 

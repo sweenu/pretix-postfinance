@@ -46,12 +46,10 @@ class TestPostFinanceClient:
             space_id=12345,
             user_id=67890,
             api_secret="test-secret",
-            environment="sandbox",
         )
         assert client.space_id == 12345
         assert client.user_id == 67890
         assert client.api_secret == "test-secret"
-        assert client.environment == "sandbox"
 
     def test_default_timeout(self):
         """Client should have 30 second default timeout."""

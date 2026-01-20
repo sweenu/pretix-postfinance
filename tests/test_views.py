@@ -36,7 +36,7 @@ def env(client):
     event.settings.set("payment_postfinance_space_id", "12345")
     event.settings.set("payment_postfinance_user_id", "67890")
     event.settings.set("payment_postfinance_api_secret", "test-secret")
-    event.settings.set("payment_postfinance_environment", "sandbox")
+
     event.settings.set("payment_postfinance__enabled", True)
 
     t = Team.objects.create(
