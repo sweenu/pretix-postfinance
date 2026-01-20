@@ -64,6 +64,9 @@ target/
 
 # AI
 .claude
+tasks
+prd.json
+progress.txt
 
 # Nix
 result

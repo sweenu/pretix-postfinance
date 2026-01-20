@@ -48,6 +48,8 @@ def mock_services():
         "RefundsService": MagicMock(),
         "WebhookEncryptionKeysService": MagicMock(),
         "PaymentMethodConfigurationsService": MagicMock(),
+        "WebhookURLsService": MagicMock(),
+        "WebhookListenersService": MagicMock(),
     }
     with (
         patch.object(api_module, "Configuration", mocks["Configuration"]),
@@ -62,6 +64,8 @@ def mock_services():
             "PaymentMethodConfigurationsService",
             mocks["PaymentMethodConfigurationsService"],
         ),
+        patch.object(api_module, "WebhookURLsService", mocks["WebhookURLsService"]),
+        patch.object(api_module, "WebhookListenersService", mocks["WebhookListenersService"]),
     ):
         yield mocks
 
