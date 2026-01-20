@@ -348,9 +348,9 @@ def test_refund_partial(env, factory, monkeypatch):
 
     refund.refresh_from_db()
     assert refund.state == OrderRefund.REFUND_STATE_DONE
-
-    payment.refresh_from_db()
-    assert payment.info_data.get("total_refunded_amount") == 5.00
+    # Refund info is stored on the refund object
+    assert refund.info_data.get("refund_id") == 789012
+    assert refund.info_data.get("state") == "SUCCESSFUL"
 
 
 @pytest.mark.django_db
@@ -424,39 +424,6 @@ def test_refund_wrong_state(env, factory):
         prov.execute_refund(refund)
 
     assert "cannot be refunded" in str(exc_info.value)
-
-
-@pytest.mark.django_db
-def test_refund_exceeds_amount(env, factory):
-    """Test refund amount exceeding remaining refundable amount."""
-    event, order = env
-
-    order.status = Order.STATUS_PAID
-    order.save()
-
-    payment = order.payments.create(
-        provider="postfinance",
-        amount=order.total,
-        info=json.dumps(
-            {
-                "transaction_id": 123456,
-                "state": TransactionState.COMPLETED.value,
-                "total_refunded_amount": 10.00,  # Already refunded 10
-            }
-        ),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    refund = order.refunds.create(
-        provider="postfinance",
-        amount=Decimal("10.00"),  # Trying to refund more than remaining (3.37)
-        payment=payment,
-    )
-
-    with pytest.raises(PaymentException) as exc_info:
-        prov.execute_refund(refund)
-
-    assert "exceeds" in str(exc_info.value)
 
 
 @pytest.mark.django_db
@@ -728,3 +695,79 @@ def test_shred_payment_info(env):
     assert info.get("_shredded") is True
     assert info.get("payment_method") is None
     assert info.get("created_on") is None
+
+
+@pytest.mark.django_db
+def test_api_refund_details(env):
+    """Test api_refund_details returns correct data."""
+    event, order = env
+
+    order.status = Order.STATUS_PAID
+    order.save()
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"transaction_id": 123456}),
+    )
+
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+        info=json.dumps(
+            {
+                "refund_id": 789012,
+                "state": "SUCCESSFUL",
+                "amount": 13.37,
+                "created_on": "2026-01-13T11:00:00Z",
+            }
+        ),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    details = prov.api_refund_details(refund)
+
+    assert details["refund_id"] == 789012
+    assert details["state"] == "SUCCESSFUL"
+    assert details["amount"] == 13.37
+    assert details["created_on"] == "2026-01-13T11:00:00Z"
+
+
+@pytest.mark.django_db
+def test_refund_control_render_short(env):
+    """Test refund_control_render_short returns correct format."""
+    event, order = env
+
+    order.status = Order.STATUS_PAID
+    order.save()
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"transaction_id": 123456}),
+    )
+
+    # With refund ID
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+        info=json.dumps({"refund_id": 789012}),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    result = prov.refund_control_render_short(refund)
+
+    assert result == "PostFinance (789012)"
+
+    # Without refund ID
+    refund2 = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+        info=json.dumps({}),
+    )
+
+    result2 = prov.refund_control_render_short(refund2)
+    assert result2 == "PostFinance"

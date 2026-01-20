@@ -15,7 +15,7 @@ import pytest
 from django.utils.timezone import now
 from django_scopes import scopes_disabled
 from postfinancecheckout.models import TransactionState
-from pretix.base.models import Event, Order, OrderPayment, Organizer, Team, User
+from pretix.base.models import Event, Order, OrderPayment, OrderRefund, Organizer, Team, User
 
 
 @pytest.fixture
@@ -265,7 +265,7 @@ def test_webhook_no_matching_payment(env, client, monkeypatch):
 
 @pytest.mark.django_db
 def test_webhook_refund_state_update(env, client, monkeypatch):
-    """Test webhook updating refund state."""
+    """Test webhook updating refund state on OrderRefund object."""
     event, order = env
 
     mock_refund = MagicMock()
@@ -283,19 +283,16 @@ def test_webhook_refund_state_update(env, client, monkeypatch):
         payment = order.payments.create(
             provider="postfinance",
             amount=order.total,
-            info=json.dumps(
-                {
-                    "transaction_id": 123456,
-                    "refund_history": [
-                        {
-                            "refund_id": 789012,
-                            "refund_state": "PENDING",
-                            "refund_amount": 13.37,
-                        }
-                    ],
-                }
-            ),
+            info=json.dumps({"transaction_id": 123456}),
             state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+        )
+        # Create an OrderRefund with the refund_id in its info
+        refund = order.refunds.create(
+            provider="postfinance",
+            amount=order.total,
+            payment=payment,
+            state=OrderRefund.REFUND_STATE_TRANSIT,
+            info=json.dumps({"refund_id": 789012}),
         )
 
     # Send refund webhook
@@ -309,12 +306,11 @@ def test_webhook_refund_state_update(env, client, monkeypatch):
 
     assert response.status_code == 200
 
-    # Check refund history was updated
+    # Check refund was marked as done
     with scopes_disabled():
-        payment.refresh_from_db()
-        refund_history = payment.info_data.get("refund_history", [])
-        assert len(refund_history) == 1
-        assert refund_history[0]["refund_state"] == "SUCCESSFUL"
+        refund.refresh_from_db()
+        assert refund.state == OrderRefund.REFUND_STATE_DONE
+        assert refund.info_data.get("state") == "SUCCESSFUL"
 
 
 @pytest.mark.django_db

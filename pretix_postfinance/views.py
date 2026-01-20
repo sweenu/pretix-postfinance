@@ -204,6 +204,13 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> bool | None:
         logger.info("PostFinance webhook: payment %s failed", payment.pk)
         return True
 
+    # Handle pending/intermediate states
+    if payment.state == OrderPayment.PAYMENT_STATE_CREATED:
+        payment.state = OrderPayment.PAYMENT_STATE_PENDING
+        payment.save(update_fields=["state"])
+        logger.info("PostFinance webhook: payment %s set to pending", payment.pk)
+        return True
+
     return False
 
 
@@ -234,9 +241,10 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> bool | None:
 
     refund_state = pf_refund.state
 
-    refund.info_data = refund.info_data or {}
-    refund.info_data["refund_id"] = entity_id
-    refund.info_data["state"] = refund_state.value if refund_state else None
+    info_data = refund.info_data or {}
+    info_data["refund_id"] = entity_id
+    info_data["state"] = refund_state.value if refund_state else None
+    refund.info = json.dumps(info_data)
     refund.save(update_fields=["info"])
 
     refund.order.log_action(

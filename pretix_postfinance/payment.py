@@ -870,6 +870,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             "created_on": info_data.get("created_on"),
         }
 
+    def api_refund_details(self, refund: OrderRefund) -> dict:
+        """
+        Return refund details for the REST API.
+        """
+        info_data = refund.info_data or {}
+        return {
+            "refund_id": info_data.get("refund_id"),
+            "state": info_data.get("state"),
+            "amount": info_data.get("amount"),
+            "created_on": info_data.get("created_on"),
+        }
+
     def matching_id(self, payment: OrderPayment) -> str | None:
         """
         Return the transaction ID for matching with external records.
@@ -884,6 +896,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         info_data = refund.info_data or {}
         refund_id = info_data.get("refund_id")
         return str(refund_id) if refund_id else None
+
+    def refund_control_render_short(self, refund: OrderRefund) -> str:
+        """
+        Return a very short version of the refund method for admin lists.
+        """
+        info_data = refund.info_data or {}
+        refund_id = info_data.get("refund_id")
+        if refund_id:
+            return f"PostFinance ({refund_id})"
+        return "PostFinance"
 
     def shred_payment_info(self, obj: OrderPayment | OrderRefund) -> None:
         """
