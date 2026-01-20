@@ -1,0 +1,51 @@
+{% load i18n %}
+
+{% if payment_info %}
+    <dl class="dl-horizontal">
+        {% if payment_info.transaction_id %}
+            <dt>{% trans "Transaction ID" %}</dt>
+            <dd>
+                {% if dashboard_url %}
+                    <a href="{{ dashboard_url }}" target="_blank" rel="noopener noreferrer">
+                        {{ payment_info.transaction_id }}
+                    </a>
+                {% else %}
+                    {{ payment_info.transaction_id }}
+                {% endif %}
+            </dd>
+        {% endif %}
+
+        {% if payment_info.state %}
+            <dt>{% trans "State" %}</dt>
+            <dd>{{ payment_info.state }}</dd>
+        {% endif %}
+
+        {% if payment_info.payment_method %}
+            <dt>{% trans "Payment Method" %}</dt>
+            <dd>{{ payment_info.payment_method }}</dd>
+        {% endif %}
+
+        {% if payment_info.error %}
+            <dt style="color: #c00;">{% trans "Error" %}</dt>
+            <dd style="color: #c00;">
+                {{ payment_info.error }}
+                {% if payment_info.error_code %} | Code: {{ payment_info.error_code }}{% endif %}
+                {% if payment_info.error_status_code %} | HTTP {{ payment_info.error_status_code }}{% endif %}
+            </dd>
+        {% endif %}
+
+        {% if error_suggestion %}
+            <dt></dt>
+            <dd><em style="color: #666;">{{ error_suggestion }}</em></dd>
+        {% endif %}
+    </dl>
+
+    {% if can_capture %}
+        <form action="{{ capture_url }}" method="POST" style="margin-top: 10px;">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-primary btn-sm">
+                {% trans "Capture Payment" %}
+            </button>
+        </form>
+    {% endif %}
+{% endif %}

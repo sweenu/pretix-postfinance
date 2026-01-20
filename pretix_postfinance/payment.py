@@ -11,7 +11,6 @@ from django.contrib import messages
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
-from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 from postfinancecheckout.models import (
     LineItemCreate,
@@ -22,6 +21,7 @@ from postfinancecheckout.models import (
 from pretix.base.forms import SecretKeySettingsField
 from pretix.base.models import OrderPayment, OrderRefund
 from pretix.base.payment import BasePaymentProvider, PaymentException
+from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .api import PostFinanceClient, PostFinanceError
@@ -193,24 +193,23 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Render additional content below the settings form.
 
-        Adds a "Test Connection" button that validates the configured
-        PostFinance credentials via AJAX.
+        Shows webhook URL and adds a "Test Connection" button that validates
+        the configured PostFinance credentials via AJAX.
         """
-        test_url = reverse(
-            "plugins:pretix_postfinance:postfinance.test_connection",
-            kwargs={
-                "organizer": self.event.organizer.slug,
-                "event": self.event.slug,
-            },
-        )
-        template = get_template("postfinance/settings_test_connection_button.html")
+        template = get_template("pretixplugins/postfinance/control_settings.html")
         ctx = {
-            "label": _("Connection Test"),
-            "button_text": _("Test Connection"),
-            "testing_text": _("Testing..."),
-            "test_url": test_url,
+            "request": request,
+            "webhook_url": build_global_uri(
+                "plugins:pretix_postfinance:postfinance.webhook",
+            ),
+            "test_url": reverse(
+                "plugins:pretix_postfinance:postfinance.test_connection",
+                kwargs={
+                    "organizer": self.event.organizer.slug,
+                    "event": self.event.slug,
+                },
+            ),
             "csrf_token": request.META.get("CSRF_COOKIE", ""),
-            "error_text": _("Connection test failed. Please try again."),
         }
         return template.render(ctx)
 
@@ -464,15 +463,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         This is displayed to the customer before they confirm their order
         to summarize what will happen during payment.
         """
-        custom_description = self.settings.get("description")
-        if custom_description:
-            return str(custom_description)
-        return str(
-            _(
-                "You will be redirected to PostFinance to complete your payment. "
-                "After completing the payment, you will be returned to this site."
-            )
-        )
+        template = get_template("pretixplugins/postfinance/checkout_payment_confirm.html")
+        ctx = {
+            "request": request,
+            "event": self.event,
+            "provider": self,
+            "description": self.settings.get("description"),
+        }
+        return template.render(ctx)
 
     def execute_payment(self, request: HttpRequest, payment: OrderPayment) -> str | None:
         """
@@ -585,45 +583,17 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Render customer-facing instructions on how to proceed with a pending payment.
         """
         info_data = payment.info_data or {}
-        transaction_id = info_data.get("transaction_id")
-        state = info_data.get("state")
-
-        parts = []
-
-        parts.append(f"<p><strong>{_('Your payment is being processed.')}</strong></p>")
-
-        if state == TransactionState.PENDING.value:
-            msg = _(
-                "Your payment has been initiated and is waiting for confirmation "
-                "from your bank or payment provider."
-            )
-            parts.append(f"<p>{msg}</p>")
-        elif state == TransactionState.PROCESSING.value:
-            msg = _("Your payment is currently being processed. This usually takes a few moments.")
-            parts.append(f"<p>{msg}</p>")
-        else:
-            msg = _(
-                "Your payment is being verified. You will receive a confirmation email "
-                "once completed."
-            )
-            parts.append(f"<p>{msg}</p>")
-
-        if transaction_id:
-            parts.append(f"<p>{_('Transaction reference')}: <code>{transaction_id}</code></p>")
-
-        parts.append(
-            "<div style='margin-top: 15px; padding: 10px; "
-            "background-color: #f8f9fa; border-left: 3px solid #007bff;'>"
-            f"<strong>{_('What happens next?')}</strong>"
-            "<ul style='margin: 10px 0 0 0; padding-left: 20px;'>"
-            f"<li>{_('Most payments are confirmed within a few minutes')}</li>"
-            f"<li>{_('You will receive an email confirmation once your payment is complete')}</li>"
-            f"<li>{_('You can refresh this page to check for updates')}</li>"
-            "</ul>"
-            "</div>"
-        )
-
-        return "".join(parts)
+        template = get_template("pretixplugins/postfinance/pending.html")
+        ctx = {
+            "request": request,
+            "event": self.event,
+            "order": payment.order,
+            "payment": payment,
+            "payment_info": info_data,
+            "transaction_id": info_data.get("transaction_id"),
+            "state": info_data.get("state"),
+        }
+        return template.render(ctx)
 
     def payment_control_render(self, request: HttpRequest, payment: OrderPayment) -> str:
         """
@@ -634,88 +604,26 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
         state = info_data.get("state")
-        payment_method = info_data.get("payment_method")
 
-        parts: list[str] = []
-
-        if transaction_id:
-            # Build link to PostFinance dashboard
-            space_id = self.settings.get("space_id")
-            if space_id:
-                dashboard_url = (
-                    f"https://checkout.postfinance.ch/s/{space_id}"
-                    f"/payment/transaction/view/{transaction_id}"
-                )
-                parts.append(
-                    format_html(
-                        '<strong>{label}:</strong> <a href="{url}" target="_blank" '
-                        'rel="noopener noreferrer">{value}</a>',
-                        label=_("Transaction ID"),
-                        url=dashboard_url,
-                        value=transaction_id,
-                    )
-                )
-            else:
-                parts.append(
-                    format_html(
-                        "<strong>{label}:</strong> {value}",
-                        label=_("Transaction ID"),
-                        value=transaction_id,
-                    )
-                )
-
-        if state:
-            parts.append(
-                format_html(
-                    "<strong>{label}:</strong> {value}",
-                    label=_("State"),
-                    value=state,
-                )
+        # Build dashboard URL if we have the required info
+        dashboard_url = None
+        space_id = self.settings.get("space_id")
+        if transaction_id and space_id:
+            dashboard_url = (
+                f"https://checkout.postfinance.ch/s/{space_id}"
+                f"/payment/transaction/view/{transaction_id}"
             )
 
-        if payment_method:
-            parts.append(
-                format_html(
-                    "<strong>{label}:</strong> {value}",
-                    label=_("Payment Method"),
-                    value=payment_method,
-                )
-            )
+        # Get error suggestion if applicable
+        error_suggestion = None
+        error_status = info_data.get("error_status_code")
+        if error_status and int(error_status) in ERROR_STATUS_MESSAGES:
+            error_suggestion = ERROR_STATUS_MESSAGES[int(error_status)]
 
-        # Show error details if any
-        error_message = info_data.get("error")
-        if error_message:
-            error_code = info_data.get("error_code")
-            error_status = info_data.get("error_status_code")
-
-            error_parts = [str(error_message)]
-            if error_code:
-                error_parts.append(f"Code: {error_code}")
-            if error_status:
-                error_parts.append(f"HTTP {error_status}")
-
-            parts.append(
-                format_html(
-                    '<strong style="color: #c00;">{label}:</strong> '
-                    '<span style="color: #c00;">{value}</span>',
-                    label=_("Error"),
-                    value=" | ".join(error_parts),
-                )
-            )
-
-            # Add actionable suggestion based on HTTP status code
-            if error_status and int(error_status) in ERROR_STATUS_MESSAGES:
-                suggestion = ERROR_STATUS_MESSAGES[int(error_status)]
-                parts.append(
-                    format_html(
-                        '<span style="color: #666; font-style: italic;">{suggestion}</span>',
-                        suggestion=suggestion,
-                    )
-                )
-
-        # Show capture button for AUTHORIZED transactions (manual capture mode)
-        # Void is handled via pretix's cancel_payment mechanism
-        if state == TransactionState.AUTHORIZED.value:
+        # Build capture URL if payment is in AUTHORIZED state
+        can_capture = state == TransactionState.AUTHORIZED.value
+        capture_url = None
+        if can_capture:
             capture_url = reverse(
                 "plugins:pretix_postfinance:postfinance.capture",
                 kwargs={
@@ -725,27 +633,19 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "payment": payment.pk,
                 },
             )
-            parts.append(
-                format_html(
-                    '<form action="{capture_url}" method="POST" '
-                    'style="margin-top: 10px; display: inline-block;">'
-                    '<input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">'
-                    '<button type="submit" class="btn btn-primary btn-sm">'
-                    "{capture_text}"
-                    "</button>"
-                    "</form>",
-                    capture_url=capture_url,
-                    csrf=request.META.get("CSRF_COOKIE", ""),
-                    capture_text=_("Capture Payment"),
-                )
-            )
 
-        # Refunds are handled via pretix's built-in refund UI since we implement
-        # payment_refund_supported() and payment_partial_refund_supported()
-
-        if parts:
-            return "<br>".join(parts)
-        return ""
+        template = get_template("pretixplugins/postfinance/control.html")
+        ctx = {
+            "request": request,
+            "event": self.event,
+            "payment": payment,
+            "payment_info": info_data,
+            "dashboard_url": dashboard_url,
+            "error_suggestion": error_suggestion,
+            "can_capture": can_capture,
+            "capture_url": capture_url,
+        }
+        return template.render(ctx)
 
     def payment_presale_render(self, payment: OrderPayment) -> str:
         """

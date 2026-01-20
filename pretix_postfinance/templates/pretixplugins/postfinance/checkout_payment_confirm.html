@@ -1,0 +1,15 @@
+{% load i18n %}
+
+{% if description %}
+    <p>{{ description }}</p>
+{% else %}
+    <p>{% blocktrans trimmed %}
+        After you submitted your order, we will redirect you to PostFinance to complete your payment.
+        You will then be redirected back here.
+    {% endblocktrans %}</p>
+{% endif %}
+
+<dl class="dl-horizontal">
+    <dt>{% trans "Payment method" %}</dt>
+    <dd>{{ provider.public_name }}</dd>
+</dl>

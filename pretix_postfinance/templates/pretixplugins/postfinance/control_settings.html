@@ -1,26 +1,36 @@
+{% load i18n %}
+
+<div class="alert alert-info">
+    {% blocktrans with url=webhook_url trimmed %}
+        Please configure a webhook in your PostFinance Checkout space to the following endpoint
+        in order to automatically update payment states: <code>{{ url }}</code>
+    {% endblocktrans %}
+</div>
+
 <div class="form-group">
-    <label class="col-md-3 control-label">{label}</label>
+    <label class="col-md-3 control-label">{% trans "Connection Test" %}</label>
     <div class="col-md-9">
         <button type="button" class="btn btn-default" id="postfinance-test-connection">
-            {button_text}
+            {% trans "Test Connection" %}
         </button>
         <span id="postfinance-test-result" style="margin-left: 10px;"></span>
     </div>
 </div>
+
 <script>
 (function() {
     var btn = document.getElementById('postfinance-test-connection');
     var result = document.getElementById('postfinance-test-result');
     btn.addEventListener('click', function() {
         btn.disabled = true;
-        btn.textContent = '{testing_text}';
+        btn.textContent = '{% trans "Testing..." %}';
         result.textContent = '';
         result.className = '';
 
-        fetch('{test_url}', {
+        fetch('{{ test_url }}', {
             method: 'POST',
             headers: {
-                'X-CSRFToken': '{csrf_token}',
+                'X-CSRFToken': '{{ csrf_token }}',
                 'Content-Type': 'application/json'
             },
             credentials: 'same-origin'
@@ -28,14 +38,14 @@
         .then(function(response) { return response.json(); })
         .then(function(data) {
             btn.disabled = false;
-            btn.textContent = '{button_text}';
+            btn.textContent = '{% trans "Test Connection" %}';
             result.textContent = data.message;
             result.style.color = data.success ? 'green' : 'red';
         })
         .catch(function(error) {
             btn.disabled = false;
-            btn.textContent = '{button_text}';
-            result.textContent = '{error_text}';
+            btn.textContent = '{% trans "Test Connection" %}';
+            result.textContent = '{% trans "Connection test failed. Please try again." %}';
             result.style.color = 'red';
         });
     });
