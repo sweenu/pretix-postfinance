@@ -2,6 +2,7 @@
 Tests for pretix_postfinance.api module.
 """
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,6 +11,7 @@ import pretix_postfinance.api as api_module
 from pretix_postfinance.api import (
     PostFinanceClient,
     PostFinanceError,
+    _get_timeout,
 )
 
 
@@ -85,8 +87,12 @@ class TestPostFinanceClient:
         assert client.api_secret == "test-secret"
 
     def test_default_timeout(self):
-        """Client should have 30 second default timeout."""
-        assert PostFinanceClient.DEFAULT_TIMEOUT == 30
+        """Client should have 15 second default timeout (from env or default)."""
+        # Default is 15 when env var is not set
+        with patch.dict(os.environ, {}, clear=True):
+            if "PRETIX_POSTFINANCE_API_TIMEOUT" in os.environ:
+                del os.environ["PRETIX_POSTFINANCE_API_TIMEOUT"]
+            assert _get_timeout() == 15
 
     def test_get_space_success(self, mock_services, mock_space):
         """get_space should return space details."""
@@ -160,3 +166,47 @@ class TestPostFinanceClient:
 
         assert result == mock_refund
         mock_refunds_instance.get_payment_refunds_id.assert_called_once_with(id=789012, space=12345)
+
+
+class TestGetTimeout:
+    """Tests for _get_timeout function."""
+
+    def test_default_when_not_set(self):
+        """Should return 15 when env var is not set."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _get_timeout() == 15
+
+    def test_valid_value(self):
+        """Should return the configured value when valid."""
+        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "20"}):
+            assert _get_timeout() == 20
+
+    def test_invalid_non_integer(self):
+        """Should return default when value is not an integer."""
+        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "abc"}):
+            assert _get_timeout() == 15
+
+    def test_invalid_zero(self):
+        """Should return default when value is zero."""
+        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "0"}):
+            assert _get_timeout() == 15
+
+    def test_invalid_negative(self):
+        """Should return default when value is negative."""
+        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "-5"}):
+            assert _get_timeout() == 15
+
+    def test_capped_at_300(self):
+        """Should cap at 300 seconds when value exceeds maximum."""
+        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "500"}):
+            assert _get_timeout() == 300
+
+    def test_boundary_300(self):
+        """Should accept 300 as valid maximum."""
+        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "300"}):
+            assert _get_timeout() == 300
+
+    def test_boundary_1(self):
+        """Should accept 1 as valid minimum."""
+        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "1"}):
+            assert _get_timeout() == 1

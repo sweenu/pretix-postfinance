@@ -8,6 +8,7 @@ for use with the pretix payment plugin.
 from __future__ import annotations
 
 import logging
+import os
 
 from postfinancecheckout import Configuration
 from postfinancecheckout.exceptions import ApiException
@@ -46,6 +47,47 @@ from postfinancecheckout.service import (
 logger = logging.getLogger(__name__)
 
 
+def _get_timeout() -> int:
+    """
+    Get API timeout from environment variable.
+
+    Reads PRETIX_POSTFINANCE_API_TIMEOUT and validates it.
+    Returns default of 15 seconds if not set or invalid.
+    Caps at 300 seconds maximum.
+    """
+    default = 15
+    env_value = os.environ.get("PRETIX_POSTFINANCE_API_TIMEOUT")
+
+    if env_value is None:
+        return default
+
+    try:
+        timeout = int(env_value)
+    except ValueError:
+        logger.warning(
+            "Invalid PRETIX_POSTFINANCE_API_TIMEOUT value '%s', using default %d",
+            env_value,
+            default,
+        )
+        return default
+
+    if timeout <= 0:
+        logger.warning(
+            "PRETIX_POSTFINANCE_API_TIMEOUT must be positive, using default %d",
+            default,
+        )
+        return default
+
+    if timeout > 300:
+        logger.warning(
+            "PRETIX_POSTFINANCE_API_TIMEOUT capped at 300 seconds (was %d)",
+            timeout,
+        )
+        return 300
+
+    return timeout
+
+
 class PostFinanceError(Exception):
     """Base exception for PostFinance API errors."""
 
@@ -74,7 +116,7 @@ class PostFinanceClient:
         api_secret: The API secret (authentication key).
     """
 
-    DEFAULT_TIMEOUT = 30  # seconds
+    DEFAULT_TIMEOUT = _get_timeout()
 
     def __init__(
         self,
