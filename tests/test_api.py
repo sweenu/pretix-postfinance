@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import pretix_postfinance.api as api_module
 from pretix_postfinance.api import (
     PostFinanceClient,
     PostFinanceError,
@@ -37,10 +38,38 @@ class TestPostFinanceError:
         assert error.message == "Not found"
 
 
+@pytest.fixture
+def mock_services():
+    """Mock all PostFinance SDK services to allow client instantiation."""
+    mocks = {
+        "Configuration": MagicMock(),
+        "SpacesService": MagicMock(),
+        "TransactionsService": MagicMock(),
+        "RefundsService": MagicMock(),
+        "WebhookEncryptionKeysService": MagicMock(),
+        "PaymentMethodConfigurationsService": MagicMock(),
+    }
+    with (
+        patch.object(api_module, "Configuration", mocks["Configuration"]),
+        patch.object(api_module, "SpacesService", mocks["SpacesService"]),
+        patch.object(api_module, "TransactionsService", mocks["TransactionsService"]),
+        patch.object(api_module, "RefundsService", mocks["RefundsService"]),
+        patch.object(
+            api_module, "WebhookEncryptionKeysService", mocks["WebhookEncryptionKeysService"]
+        ),
+        patch.object(
+            api_module,
+            "PaymentMethodConfigurationsService",
+            mocks["PaymentMethodConfigurationsService"],
+        ),
+    ):
+        yield mocks
+
+
 class TestPostFinanceClient:
     """Tests for PostFinanceClient class."""
 
-    def test_client_initialization(self):
+    def test_client_initialization(self, mock_services):  # noqa: ARG002
         """Client should initialize with correct attributes."""
         client = PostFinanceClient(
             space_id=12345,
@@ -55,24 +84,11 @@ class TestPostFinanceClient:
         """Client should have 30 second default timeout."""
         assert PostFinanceClient.DEFAULT_TIMEOUT == 30
 
-    @patch("pretix_postfinance.api.SpacesService")
-    @patch("pretix_postfinance.api.TransactionsService")
-    @patch("pretix_postfinance.api.RefundsService")
-    @patch("pretix_postfinance.api.WebhookEncryptionKeysService")
-    @patch("pretix_postfinance.api.Configuration")
-    def test_get_space_success(
-        self,
-        _mock_config,
-        _mock_webhook_service,
-        _mock_refunds_service,
-        _mock_transactions_service,
-        mock_spaces_service,
-        mock_space,
-    ):
+    def test_get_space_success(self, mock_services, mock_space):
         """get_space should return space details."""
         mock_spaces_instance = MagicMock()
         mock_spaces_instance.get_spaces_id.return_value = mock_space
-        mock_spaces_service.return_value = mock_spaces_instance
+        mock_services["SpacesService"].return_value = mock_spaces_instance
 
         client = PostFinanceClient(
             space_id=12345,
@@ -85,26 +101,14 @@ class TestPostFinanceClient:
         assert result == mock_space
         mock_spaces_instance.get_spaces_id.assert_called_once_with(id=12345)
 
-    @patch("pretix_postfinance.api.SpacesService")
-    @patch("pretix_postfinance.api.TransactionsService")
-    @patch("pretix_postfinance.api.RefundsService")
-    @patch("pretix_postfinance.api.WebhookEncryptionKeysService")
-    @patch("pretix_postfinance.api.Configuration")
-    def test_get_space_api_exception(
-        self,
-        _mock_config,
-        _mock_webhook_service,
-        _mock_refunds_service,
-        _mock_transactions_service,
-        mock_spaces_service,
-    ):
+    def test_get_space_api_exception(self, mock_services):
         """get_space should raise PostFinanceError on API exception."""
         from postfinancecheckout.exceptions import ApiException
 
         mock_spaces_instance = MagicMock()
         mock_api_error = ApiException(status=401, reason="Unauthorized")
         mock_spaces_instance.get_spaces_id.side_effect = mock_api_error
-        mock_spaces_service.return_value = mock_spaces_instance
+        mock_services["SpacesService"].return_value = mock_spaces_instance
 
         client = PostFinanceClient(
             space_id=12345,
@@ -117,24 +121,11 @@ class TestPostFinanceClient:
 
         assert exc_info.value.status_code == 401
 
-    @patch("pretix_postfinance.api.SpacesService")
-    @patch("pretix_postfinance.api.TransactionsService")
-    @patch("pretix_postfinance.api.RefundsService")
-    @patch("pretix_postfinance.api.WebhookEncryptionKeysService")
-    @patch("pretix_postfinance.api.Configuration")
-    def test_get_transaction_success(
-        self,
-        _mock_config,
-        _mock_webhook_service,
-        _mock_refunds_service,
-        mock_transactions_service,
-        _mock_spaces_service,
-        mock_transaction,
-    ):
+    def test_get_transaction_success(self, mock_services, mock_transaction):
         """get_transaction should return transaction details."""
         mock_transactions_instance = MagicMock()
         mock_transactions_instance.get_payment_transactions_id.return_value = mock_transaction
-        mock_transactions_service.return_value = mock_transactions_instance
+        mock_services["TransactionsService"].return_value = mock_transactions_instance
 
         client = PostFinanceClient(
             space_id=12345,
@@ -149,24 +140,11 @@ class TestPostFinanceClient:
             id=123456, space=12345
         )
 
-    @patch("pretix_postfinance.api.SpacesService")
-    @patch("pretix_postfinance.api.TransactionsService")
-    @patch("pretix_postfinance.api.RefundsService")
-    @patch("pretix_postfinance.api.WebhookEncryptionKeysService")
-    @patch("pretix_postfinance.api.Configuration")
-    def test_get_refund_success(
-        self,
-        _mock_config,
-        _mock_webhook_service,
-        mock_refunds_service,
-        _mock_transactions_service,
-        _mock_spaces_service,
-        mock_refund,
-    ):
+    def test_get_refund_success(self, mock_services, mock_refund):
         """get_refund should return refund details."""
         mock_refunds_instance = MagicMock()
         mock_refunds_instance.get_payment_refunds_id.return_value = mock_refund
-        mock_refunds_service.return_value = mock_refunds_instance
+        mock_services["RefundsService"].return_value = mock_refunds_instance
 
         client = PostFinanceClient(
             space_id=12345,

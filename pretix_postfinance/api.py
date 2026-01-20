@@ -12,7 +12,9 @@ import logging
 from postfinancecheckout import Configuration
 from postfinancecheckout.exceptions import ApiException
 from postfinancecheckout.models import (
+    CreationEntityState,
     LineItemCreate,
+    PaymentMethodConfiguration,
     Refund,
     RefundCreate,
     RefundType,
@@ -27,6 +29,7 @@ from postfinancecheckout.postfinancecheckout_sdk_exception import (
     PostFinanceCheckoutSdkException,
 )
 from postfinancecheckout.service import (
+    PaymentMethodConfigurationsService,
     RefundsService,
     SpacesService,
     TransactionsService,
@@ -93,6 +96,9 @@ class PostFinanceClient:
         self._transactions_service = TransactionsService(self._configuration)
         self._refunds_service = RefundsService(self._configuration)
         self._webhook_encryption_service = WebhookEncryptionKeysService(self._configuration)
+        self._payment_method_configs_service = PaymentMethodConfigurationsService(
+            self._configuration
+        )
 
     def get_space(self) -> Space:
         """
@@ -117,6 +123,38 @@ class PostFinanceClient:
             ) from e
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting space: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def get_payment_method_configurations(self) -> list[PaymentMethodConfiguration]:
+        """
+        Get all active payment method configurations for the space.
+
+        Returns:
+            List of PaymentMethodConfiguration objects that are active.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        try:
+            response = self._payment_method_configs_service.get_payment_method_configurations(
+                space=self.space_id,
+                limit=100,
+            )
+            # Filter to only return active configurations
+            return [
+                config
+                for config in (response.items or [])
+                if config.state == CreationEntityState.ACTIVE
+            ]
+        except ApiException as e:
+            logger.error("PostFinance API error getting payment method configurations: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting payment method configurations: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
     def create_transaction(

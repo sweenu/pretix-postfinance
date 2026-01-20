@@ -86,6 +86,77 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         return str(self.settings.get("public_name")) or self.verbose_name
 
+    def _get_payment_method_choices(self) -> list[tuple[str, str]]:
+        """
+        Fetch available payment method configurations from PostFinance.
+
+        Returns a list of (id, name) tuples for use in a MultipleChoiceField.
+        Returns an empty list if credentials are not configured or API call fails.
+        """
+        space_id = self.settings.get("space_id")
+        user_id = self.settings.get("user_id")
+        api_secret = self.settings.get("api_secret")
+
+        if not all([space_id, user_id, api_secret]):
+            return []
+
+        try:
+            client = self._get_client()
+            configs = client.get_payment_method_configurations()
+            choices = []
+            for config in configs:
+                if config.id is not None:
+                    # Use resolved_title if available, fall back to name
+                    name = config.name or str(config.id)
+                    if config.resolved_title:
+                        # resolved_title is a dict of language -> title
+                        # Try to get English or first available
+                        title = config.resolved_title.get(
+                            "en-US", config.resolved_title.get("en", "")
+                        )
+                        if title:
+                            name = title
+                    choices.append((str(config.id), name))
+            return sorted(choices, key=lambda x: x[1])
+        except PostFinanceError:
+            logger.warning("Failed to fetch payment method configurations", exc_info=True)
+            return []
+
+    def _parse_allowed_payment_methods(self) -> list[int] | None:
+        """
+        Parse the allowed_payment_methods setting.
+
+        Handles both the new list format (from MultipleChoiceField) and the
+        legacy comma-separated string format for backwards compatibility.
+
+        Returns:
+            List of payment method configuration IDs, or None if all methods allowed.
+        """
+        allowed_methods = self.settings.get("allowed_payment_methods")
+
+        if not allowed_methods:
+            return None
+
+        # Handle list format (from MultipleChoiceField)
+        if isinstance(allowed_methods, list):
+            try:
+                return [int(x) for x in allowed_methods if x]
+            except (ValueError, TypeError):
+                logger.warning("Invalid allowed_payment_methods list: %s", allowed_methods)
+                return None
+
+        # Handle legacy comma-separated string format
+        if isinstance(allowed_methods, str):
+            if not allowed_methods.strip():
+                return None
+            try:
+                return [int(x.strip()) for x in allowed_methods.split(",") if x.strip()]
+            except ValueError:
+                logger.warning("Invalid allowed_payment_methods string: %s", allowed_methods)
+                return None
+
+        return None
+
     @property
     def settings_form_fields(self) -> OrderedDict:
         """
@@ -93,6 +164,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         These will be displayed in the event's payment settings.
         """
+        # Get dynamic payment method choices
+        payment_method_choices = self._get_payment_method_choices()
+
         d = OrderedDict(
             list(super().settings_form_fields.items())
             + [
@@ -174,15 +248,28 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 ),
                 (
                     "allowed_payment_methods",
-                    forms.CharField(
+                    forms.MultipleChoiceField(
                         label=_("Allowed Payment Methods"),
                         help_text=_(
-                            "Restrict which payment methods are available to customers. "
-                            "Enter comma-separated payment method configuration IDs from "
-                            "your PostFinance space (e.g., '1234,5678'). "
-                            "Leave empty to allow all payment methods."
+                            "Select which payment methods are available to customers. "
+                            "Leave empty to allow all payment methods. "
+                            "Save your credentials first to see available options."
+                        ),
+                        choices=payment_method_choices,
+                        widget=forms.CheckboxSelectMultiple,
+                        required=False,
+                    )
+                    if payment_method_choices
+                    else forms.CharField(
+                        label=_("Allowed Payment Methods"),
+                        help_text=_(
+                            "Save your Space ID, User ID, and Authentication key first, "
+                            "then this field will show available payment methods as checkboxes."
                         ),
                         required=False,
+                        widget=forms.TextInput(
+                            attrs={"placeholder": _("Configure credentials first")}
+                        ),
                     ),
                 ),
             ]
@@ -386,18 +473,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 completion_behavior = TransactionCompletionBehavior.COMPLETE_IMMEDIATELY
 
             # Parse allowed payment method configurations
-            allowed_payment_methods: list[int] | None = None
-            allowed_methods_str = self.settings.get("allowed_payment_methods", "")
-            if allowed_methods_str:
-                try:
-                    allowed_payment_methods = [
-                        int(x.strip()) for x in str(allowed_methods_str).split(",") if x.strip()
-                    ]
-                except ValueError:
-                    logger.warning(
-                        "Invalid allowed_payment_methods setting: %s",
-                        allowed_methods_str,
-                    )
+            allowed_payment_methods = self._parse_allowed_payment_methods()
 
             transaction = client.create_transaction(
                 currency=currency,
