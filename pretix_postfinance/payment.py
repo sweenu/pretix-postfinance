@@ -95,9 +95,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         space_id = self.settings.get("space_id")
         user_id = self.settings.get("user_id")
-        api_secret = self.settings.get("api_secret")
+        auth_key = self.settings.get("auth_key")
 
-        if not all([space_id, user_id, api_secret]):
+        if not all([space_id, user_id, auth_key]):
             return []
 
         try:
@@ -313,20 +313,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         space_id = self.settings.get("space_id")
         user_id = self.settings.get("user_id")
-        api_secret = self.settings.get("api_secret")
+        auth_key = self.settings.get("auth_key")
 
         logger.debug(
-            "Creating PostFinance client for event %s: space_id=%s, user_id=%s, api_secret=%s",
+            "Creating PostFinance client for event %s: space_id=%s, user_id=%s, auth_key=%s",
             self.event.slug,
             space_id,
             user_id,
-            "***" if api_secret else "(empty)",
+            "***" if auth_key else "(empty)",
         )
 
         return PostFinanceClient(
             space_id=int(space_id) if space_id else 0,
             user_id=int(user_id) if user_id else 0,
-            api_secret=str(api_secret) if api_secret else "",
+            api_secret=str(auth_key) if auth_key else "",
         )
 
     def test_connection(self) -> tuple[bool, str]:
@@ -338,14 +338,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         space_id = self.settings.get("space_id")
         user_id = self.settings.get("user_id")
-        api_secret = self.settings.get("api_secret")
+        auth_key = self.settings.get("auth_key")
 
-        if not all([space_id, user_id, api_secret]):
+        if not all([space_id, user_id, auth_key]):
             return (
                 False,
                 str(
                     _(
-                        "Please configure Space ID, User ID, and API Secret before "
+                        "Please configure Space ID, User ID, and Authentication Key before "
                         "testing the connection."
                     )
                 ),

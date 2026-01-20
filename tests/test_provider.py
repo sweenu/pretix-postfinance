@@ -38,7 +38,7 @@ def env():
         )
         event.settings.set("payment_postfinance_space_id", "12345")
         event.settings.set("payment_postfinance_user_id", "67890")
-        event.settings.set("payment_postfinance_api_secret", "test-secret")
+        event.settings.set("payment_postfinance_auth_key", "test-secret")
 
         event.settings.set("payment_postfinance__enabled", True)
 
@@ -591,7 +591,7 @@ def test_test_connection_missing_credentials(env):
     # Clear credentials
     event.settings.set("payment_postfinance_space_id", "")
     event.settings.set("payment_postfinance_user_id", "")
-    event.settings.set("payment_postfinance_api_secret", "")
+    event.settings.set("payment_postfinance_auth_key", "")
 
     prov = PostFinancePaymentProvider(event)
     success, message = prov.test_connection()

@@ -7,8 +7,9 @@
     <code>{{ url }}</code>
     {% endblocktrans %}
     <br /><br />
-    {% trans "You can set this up automatically using the button below, or
-    configure it manually in your PostFinance Checkout dashboard." %}
+    {% blocktrans trimmed %} You can set this up automatically using the button
+    below, or configure it manually in your PostFinance Checkout dashboard.
+    {% endblocktrans %}
 </div>
 
 <div class="form-group">
@@ -39,9 +40,11 @@
         </button>
         <span id="postfinance-setup-result"></span>
         <p class="help-block">
-            {% trans "This will create the necessary webhook URL and listeners
-            in your PostFinance Checkout space. If they already exist, they will
-            be reused." %}
+            {% blocktrans trimmed %}
+            This will create the necessary webhook URL
+            and listeners in your PostFinance Checkout space. If they already
+            exist, they will be reused.
+            {% endblocktrans %}
         </p>
     </div>
 </div>

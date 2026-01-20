@@ -646,9 +646,13 @@ class PostFinanceClient:
         ]
 
         # Refund states we care about
+        # Note: We listen to all state transitions, not just terminal states
+        # Note: CREATE is not a valid listener state (refunds start in PENDING)
         REFUND_STATES = [
-            RefundState.SUCCESSFUL.value,
+            RefundState.PENDING.value,
+            RefundState.MANUAL_CHECK.value,
             RefundState.FAILED.value,
+            RefundState.SUCCESSFUL.value,
         ]
 
         result: dict[str, int | None] = {

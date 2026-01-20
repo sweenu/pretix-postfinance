@@ -106,7 +106,7 @@ def _get_client_for_space(space_id: int) -> PostFinanceClient | None:
             return PostFinanceClient(
                 space_id=int(configured_space),
                 user_id=int(gs.get("payment_postfinance_user_id", 0)),
-                api_secret=str(gs.get("payment_postfinance_api_secret", "")),
+                api_secret=str(gs.get("payment_postfinance_auth_key", "")),
             )
     except Exception as e:
         logger.debug("Could not check global settings: %s", e)
@@ -119,7 +119,7 @@ def _get_client_for_space(space_id: int) -> PostFinanceClient | None:
                 return PostFinanceClient(
                     space_id=int(event_space_id),
                     user_id=int(es.get("payment_postfinance_user_id", 0)),
-                    api_secret=str(es.get("payment_postfinance_api_secret", "")),
+                    api_secret=str(es.get("payment_postfinance_auth_key", "")),
                 )
         except Exception as e:
             logger.debug("Could not check event %s settings: %s", event.slug, e)
@@ -318,15 +318,15 @@ class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
 
         space_id = provider.settings.get("space_id")
         user_id = provider.settings.get("user_id")
-        api_secret = provider.settings.get("api_secret")
+        auth_key = provider.settings.get("auth_key")
 
-        if not all([space_id, user_id, api_secret]):
+        if not all([space_id, user_id, auth_key]):
             return JsonResponse(
                 {
                     "success": False,
                     "message": str(
                         _(
-                            "Please configure Space ID, User ID, and API Secret before "
+                            "Please configure Space ID, User ID, and Authentication Key before "
                             "setting up webhooks."
                         )
                     ),
@@ -341,7 +341,7 @@ class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
             client = PostFinanceClient(
                 space_id=int(space_id),
                 user_id=int(user_id),
-                api_secret=str(api_secret),
+                api_secret=str(auth_key),
             )
             result = client.setup_webhooks(webhook_url)
 
