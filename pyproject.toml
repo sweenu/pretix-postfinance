@@ -8,7 +8,7 @@ version = "1.0.1"
 description = "PostFinance Checkout payment plugin for pretix"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.13"
 authors = [
     {name = "Sweenu", email = "contact@sweenu.xyz"}
 ]
@@ -26,8 +26,6 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "postfinancecheckout>=6.0.0",
@@ -37,9 +35,10 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "django>=4.0",
-    "mypy>=1.0",
-    "django-stubs>=4.0",
+    "pytest-django>=4.0",
+    "pretix>=2025.10",
+    "mypy>=1.0,<1.15",
+    "django-stubs>=4.0,<5.1",
     "ruff>=0.1",
     "commitizen>=4.9.1",
 ]
@@ -77,7 +76,6 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 no_implicit_optional = true
 exclude = '(^|/)(setup\.py)$'
-exclude_gitignore = true
 
 # Django plugin
 plugins = ["mypy_django_plugin.main"]

@@ -143,7 +143,7 @@ class PostFinanceClient:
             # Filter to only return active configurations
             return [
                 config
-                for config in (response.items or [])
+                for config in (response.data or [])
                 if config.state == CreationEntityState.ACTIVE
             ]
         except ApiException as e:
