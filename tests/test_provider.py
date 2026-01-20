@@ -771,3 +771,175 @@ def test_refund_control_render_short(env):
 
     result2 = prov.refund_control_render_short(refund2)
     assert result2 == "PostFinance"
+
+
+# Session cleanup tests
+
+
+@pytest.mark.django_db
+def test_execute_payment_cleans_session_on_success(env, factory, monkeypatch):
+    """Test that session is cleaned up after successful payment."""
+    event, order = env
+
+    def get_transaction(transaction_id):
+        t = MockedTransaction()
+        t.state = TransactionState.COMPLETED
+        return t
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: get_transaction(tid),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = factory.post("/")
+    req.session = {"payment_postfinance_transaction_id": 123456}
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+    prov.execute_payment(req, payment)
+
+    # Session should be cleaned up
+    assert "payment_postfinance_transaction_id" not in req.session
+
+
+@pytest.mark.django_db
+def test_execute_payment_cleans_session_on_api_error(env, factory, monkeypatch):
+    """Test that session is cleaned up when API error occurs."""
+    event, order = env
+
+    def get_transaction_error(transaction_id):
+        raise PostFinanceError("API Error", status_code=500)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: get_transaction_error(tid),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = factory.post("/")
+    req.session = {"payment_postfinance_transaction_id": 123456}
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+
+    with pytest.raises(PaymentException):
+        prov.execute_payment(req, payment)
+
+    # Session should still be cleaned up even after error
+    assert "payment_postfinance_transaction_id" not in req.session
+
+
+@pytest.mark.django_db
+def test_execute_payment_cleans_session_on_generic_exception(env, factory, monkeypatch):
+    """Test that session is cleaned up when generic exception occurs."""
+    event, order = env
+
+    def get_transaction_error(transaction_id):
+        raise RuntimeError("Unexpected error")
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: get_transaction_error(tid),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = factory.post("/")
+    req.session = {"payment_postfinance_transaction_id": 123456}
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+
+    with pytest.raises(PaymentException):
+        prov.execute_payment(req, payment)
+
+    # Session should still be cleaned up even after error
+    assert "payment_postfinance_transaction_id" not in req.session
+
+
+@pytest.mark.django_db
+def test_checkout_prepare_clears_stale_session(env, factory, monkeypatch):
+    """Test that checkout_prepare clears any stale transaction ID at start."""
+    event, order = env
+
+    created_transaction = MockedTransaction()
+    created_transaction.id = 999888
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        lambda self, **kwargs: created_transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = factory.post("/")
+    req.session = {"payment_postfinance_transaction_id": 123456}  # Stale ID
+    req.event = event
+
+    cart = {"total": order.total, "positions": [], "fees": []}
+    result = prov.checkout_prepare(req, cart)
+
+    # Should return payment URL
+    assert result == "https://checkout.postfinance.ch/pay/999888"
+    # Session should have new transaction ID, not the stale one
+    assert req.session.get("payment_postfinance_transaction_id") == 999888
+
+
+@pytest.mark.django_db
+def test_checkout_prepare_cleans_session_on_payment_url_failure(env, factory, monkeypatch):
+    """Test that session is cleaned when get_payment_page_url fails."""
+    event, order = env
+
+    created_transaction = MockedTransaction()
+    created_transaction.id = 999888
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        lambda self, **kwargs: created_transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: None,  # Simulate failure
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = factory.post("/")
+    req.session = {}
+    req.event = event
+    req._messages = []  # Mock messages
+
+    cart = {"total": order.total, "positions": [], "fees": []}
+    result = prov.checkout_prepare(req, cart)
+
+    # Should return False
+    assert result is False
+    # Session should be cleaned up
+    assert "payment_postfinance_transaction_id" not in req.session
+
+
+@pytest.mark.django_db
+def test_checkout_prepare_cleans_session_on_api_error(env, factory, monkeypatch):
+    """Test that session is cleaned when API error occurs during checkout_prepare."""
+    event, order = env
+
+    def create_transaction_error(**kwargs):
+        raise PostFinanceError("API Error", status_code=500)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        lambda self, **kwargs: create_transaction_error(**kwargs),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = factory.post("/")
+    req.session = {"payment_postfinance_transaction_id": 123456}  # Pre-existing
+    req.event = event
+    req._messages = []  # Mock messages
+
+    cart = {"total": order.total, "positions": [], "fees": []}
+    result = prov.checkout_prepare(req, cart)
+
+    # Should return False
+    assert result is False
+    # Session should be cleaned up
+    assert "payment_postfinance_transaction_id" not in req.session

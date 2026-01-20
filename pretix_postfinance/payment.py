@@ -465,6 +465,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Creates a PostFinance transaction and returns the payment page URL
         to redirect the customer to PostFinance for payment.
         """
+        # Fresh start - clear any stale transaction ID from previous attempts
+        request.session.pop("payment_postfinance_transaction_id", None)
+
         try:
             client = self._get_client()
             currency = self.event.currency
@@ -526,6 +529,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "Failed to get payment page URL for transaction %s",
                     transaction_id,
                 )
+                request.session.pop("payment_postfinance_transaction_id", None)
                 messages.error(
                     request,
                     str(_("Failed to redirect to payment page. Please try again.")),
@@ -536,6 +540,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         except PostFinanceError as e:
             logger.exception("PostFinance API error during checkout_prepare: %s", e)
+            request.session.pop("payment_postfinance_transaction_id", None)
             messages.error(
                 request,
                 str(_("Payment service error. Please try again later.")),
@@ -543,6 +548,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return False
         except Exception as e:
             logger.exception("Unexpected error during checkout_prepare: %s", e)
+            request.session.pop("payment_postfinance_transaction_id", None)
             messages.error(
                 request,
                 str(_("An unexpected error occurred. Please try again.")),
@@ -642,10 +648,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     state,
                 )
 
-            # Clean up session
-            if "payment_postfinance_transaction_id" in request.session:
-                del request.session["payment_postfinance_transaction_id"]
-
         except PostFinanceError as e:
             logger.exception("PostFinance API error during execute_payment: %s", e)
             payment.info_data = {
@@ -670,6 +672,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             raise PaymentException(
                 str(_("An unexpected error occurred: {error}")).format(error=str(e))
             ) from e
+
+        finally:
+            # Always clean up session, whether success or failure
+            request.session.pop("payment_postfinance_transaction_id", None)
 
         return None
 
