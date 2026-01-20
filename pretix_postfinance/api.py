@@ -17,7 +17,6 @@ from postfinancecheckout.models import (
     PaymentMethodConfiguration,
     Refund,
     RefundCreate,
-    RefundState,
     RefundType,
     Space,
     Transaction,
@@ -617,21 +616,22 @@ class PostFinanceClient:
 
         This is a convenience method that:
         1. Creates a webhook URL (or finds an existing one with the same URL)
-        2. Creates webhook listeners for Transaction and Refund entities
+        2. Creates a webhook listener for Transaction state changes
+
+        Note: PostFinance does not support webhook listeners for Refund entities.
+        Refund state changes are tracked through the Transaction webhook instead.
 
         Args:
             webhook_url: The URL where webhooks will be sent.
 
         Returns:
-            A dict with keys 'webhook_url_id', 'transaction_listener_id',
-            and 'refund_listener_id'.
+            A dict with keys 'webhook_url_id' and 'transaction_listener_id'.
 
         Raises:
             PostFinanceError: If any API request fails.
         """
         # PostFinance entity IDs (these are fixed IDs in PostFinance's system)
         TRANSACTION_ENTITY_ID = 1472041829003
-        REFUND_ENTITY_ID = 1472041816898
 
         # Transaction states we care about (all major state changes)
         TRANSACTION_STATES = [
@@ -645,20 +645,9 @@ class PostFinanceClient:
             TransactionState.PROCESSING.value,
         ]
 
-        # Refund states we care about
-        # Note: We listen to all state transitions, not just terminal states
-        # Note: CREATE is not a valid listener state (refunds start in PENDING)
-        REFUND_STATES = [
-            RefundState.PENDING.value,
-            RefundState.MANUAL_CHECK.value,
-            RefundState.FAILED.value,
-            RefundState.SUCCESSFUL.value,
-        ]
-
         result: dict[str, int | None] = {
             "webhook_url_id": None,
             "transaction_listener_id": None,
-            "refund_listener_id": None,
         }
 
         # Check if a webhook URL with this URL already exists
@@ -686,22 +675,18 @@ class PostFinanceClient:
         # Check existing listeners to avoid duplicates
         existing_listeners = self.get_webhook_listeners()
         has_transaction_listener = False
-        has_refund_listener = False
 
         for listener in existing_listeners:
             listener_url_id = listener.url.id if listener.url else None
             if (
                 listener_url_id == webhook_url_obj.id
                 and listener.state == CreationEntityState.ACTIVE
+                and listener.entity == TRANSACTION_ENTITY_ID
             ):
-                if listener.entity == TRANSACTION_ENTITY_ID:
-                    has_transaction_listener = True
-                    result["transaction_listener_id"] = listener.id
-                    logger.info("Found existing transaction listener with ID %s", listener.id)
-                elif listener.entity == REFUND_ENTITY_ID:
-                    has_refund_listener = True
-                    result["refund_listener_id"] = listener.id
-                    logger.info("Found existing refund listener with ID %s", listener.id)
+                has_transaction_listener = True
+                result["transaction_listener_id"] = listener.id
+                logger.info("Found existing transaction listener with ID %s", listener.id)
+                break
 
         # Create Transaction listener if it doesn't exist
         if not has_transaction_listener:
@@ -713,16 +698,5 @@ class PostFinanceClient:
             )
             result["transaction_listener_id"] = transaction_listener.id
             logger.info("Created transaction listener with ID %s", transaction_listener.id)
-
-        # Create Refund listener if it doesn't exist
-        if not has_refund_listener:
-            refund_listener = self.create_webhook_listener(
-                name="pretix Refund Updates",
-                webhook_url_id=webhook_url_obj.id,
-                entity_id=REFUND_ENTITY_ID,
-                entity_states=REFUND_STATES,
-            )
-            result["refund_listener_id"] = refund_listener.id
-            logger.info("Created refund listener with ID %s", refund_listener.id)
 
         return result
