@@ -296,7 +296,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "event": self.event.slug,
                 },
             ),
-            "csrf_token": request.META.get("CSRF_COOKIE", ""),
         }
         return template.render(ctx)
 
@@ -304,10 +303,22 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Create and return a PostFinance API client using the configured settings.
         """
+        space_id = self.settings.get("space_id")
+        user_id = self.settings.get("user_id")
+        api_secret = self.settings.get("api_secret")
+
+        logger.debug(
+            "Creating PostFinance client for event %s: space_id=%s, user_id=%s, api_secret=%s",
+            self.event.slug,
+            space_id,
+            user_id,
+            "***" if api_secret else "(empty)",
+        )
+
         return PostFinanceClient(
-            space_id=int(self.settings.get("space_id", 0)),
-            user_id=int(self.settings.get("user_id", 0)),
-            api_secret=str(self.settings.get("api_secret", "")),
+            space_id=int(space_id) if space_id else 0,
+            user_id=int(user_id) if user_id else 0,
+            api_secret=str(api_secret) if api_secret else "",
         )
 
     def test_connection(self) -> tuple[bool, str]:
