@@ -25,13 +25,13 @@ EMAIL_BACKEND = EMAIL_CUSTOM_SMTP_BACKEND = "django.core.mail.backends.locmem.Em
 
 COMPRESS_ENABLED = COMPRESS_OFFLINE = False
 COMPRESS_CACHE_BACKEND = "testcache"
-STORAGES["staticfiles"]["BACKEND"] = "django.contrib.staticfiles.storage.StaticFilesStorage"  # noqa: F405
+STORAGES["staticfiles"]["BACKEND"] = "django.contrib.staticfiles.storage.StaticFilesStorage"  # type: ignore[name-defined]  # noqa: F405
 PRETIX_INSTANCE_NAME = "pretix.eu"
 
-COMPRESS_PRECOMPILERS_ORIGINAL = COMPRESS_PRECOMPILERS  # noqa: F405
+COMPRESS_PRECOMPILERS_ORIGINAL = COMPRESS_PRECOMPILERS  # type: ignore[has-type,used-before-def]  # noqa: F405
 COMPRESS_PRECOMPILERS = ()
-TEMPLATES[0]["OPTIONS"]["loaders"] = (  # noqa: F405
-    ("django.template.loaders.cached.Loader", template_loaders),  # noqa: F405
+TEMPLATES[0]["OPTIONS"]["loaders"] = (  # type: ignore[name-defined]  # noqa: F405
+    ("django.template.loaders.cached.Loader", template_loaders),  # type: ignore[name-defined]  # noqa: F405
 )
 
 DEBUG = True
@@ -61,14 +61,14 @@ CACHES = {
 
 # Set databases
 DATABASE_REPLICA = "default"
-DATABASES["default"]["CONN_MAX_AGE"] = 0  # noqa: F405
-DATABASES.pop("replica", None)  # noqa: F405
+DATABASES["default"]["CONN_MAX_AGE"] = 0  # type: ignore[name-defined]  # noqa: F405
+DATABASES.pop("replica", None)  # type: ignore[name-defined]  # noqa: F405
 
-MIDDLEWARE.insert(0, "pretix.testutils.middleware.DebugFlagMiddleware")  # noqa: F405
+MIDDLEWARE.insert(0, "pretix.testutils.middleware.DebugFlagMiddleware")  # type: ignore[name-defined]  # noqa: F405
 
 # Install our plugin if not already installed (pretix auto-discovers plugins)
-if "pretix_postfinance" not in INSTALLED_APPS:  # noqa: F405
-    INSTALLED_APPS.append("pretix_postfinance")  # noqa: F405
+if "pretix_postfinance" not in INSTALLED_APPS:  # type: ignore[name-defined]  # noqa: F405
+    INSTALLED_APPS.append("pretix_postfinance")  # type: ignore[name-defined]  # noqa: F405
 
 
 # Always run migrations for tests - we need the database schema
