@@ -786,11 +786,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         return self.payment_refund_supported(payment)
 
-    def execute_refund(self, refund: OrderRefund) -> None:
+    def execute_refund(self, refund: OrderRefund, user: str = "system") -> None:
         """
         Execute a refund for an order.
 
         This is called by pretix when a refund needs to be processed.
+
+        Args:
+            refund: The OrderRefund to process.
+            user: The user performing the action (for audit logging).
         """
         payment = refund.payment
         info_data = payment.info_data or {}
@@ -851,6 +855,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 refund.amount,
             )
 
+            # Audit log for successful refund
+            refund.order.log_action(
+                "pretix_postfinance.refund",
+                data={
+                    "transaction_id": transaction_id,
+                    "refund_id": postfinance_refund.id,
+                    "amount": str(refund.amount),
+                    "user": user,
+                    "success": True,
+                },
+            )
+
         except PostFinanceError as e:
             logger.exception(
                 "PostFinance API error refunding transaction %s: %s",
@@ -858,16 +874,28 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 e,
             )
             # Store error details in refund.info for admin visibility
-            info_data = refund.info_data or {}
-            info_data.update(
+            refund_info_data = refund.info_data or {}
+            refund_info_data.update(
                 {
                     "error": str(e),
                     "error_code": e.error_code,
                     "error_status_code": e.status_code,
                 }
             )
-            refund.info = json.dumps(info_data)
+            refund.info = json.dumps(refund_info_data)
             refund.save(update_fields=["info"])
+
+            # Audit log for failed refund
+            refund.order.log_action(
+                "pretix_postfinance.refund.failed",
+                data={
+                    "transaction_id": transaction_id,
+                    "amount": str(refund.amount),
+                    "user": user,
+                    "success": False,
+                    "error": str(e),
+                },
+            )
             raise PaymentException(_("Refund failed: {error}").format(error=str(e))) from e
 
     def api_payment_details(self, payment: OrderPayment) -> dict:
@@ -960,9 +988,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     # Helper methods for custom views (capture, void, refund)
 
-    def execute_capture(self, payment: OrderPayment) -> tuple[bool, str | None]:
+    def execute_capture(
+        self, payment: OrderPayment, user: str = "system"
+    ) -> tuple[bool, str | None]:
         """
         Capture (complete) an authorized transaction.
+
+        Args:
+            payment: The OrderPayment to capture.
+            user: The user performing the action (for audit logging).
         """
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
@@ -999,6 +1033,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 payment.pk,
             )
 
+            # Audit log for successful capture
+            payment.order.log_action(
+                "pretix_postfinance.capture",
+                data={
+                    "transaction_id": transaction_id,
+                    "user": user,
+                    "success": True,
+                },
+            )
+
             # Confirm the payment in pretix
             try:
                 payment.confirm()
@@ -1018,6 +1062,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 transaction_id,
                 e,
             )
+            # Audit log for failed capture
+            payment.order.log_action(
+                "pretix_postfinance.capture.failed",
+                data={
+                    "transaction_id": transaction_id,
+                    "user": user,
+                    "success": False,
+                    "error": str(e),
+                },
+            )
             return (False, str(_("Capture failed: {error}").format(error=str(e))))
         except Exception as e:
             logger.exception(
@@ -1025,11 +1079,27 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 transaction_id,
                 e,
             )
+            # Audit log for failed capture
+            payment.order.log_action(
+                "pretix_postfinance.capture.failed",
+                data={
+                    "transaction_id": transaction_id,
+                    "user": user,
+                    "success": False,
+                    "error": str(e),
+                },
+            )
             return (False, str(_("Unexpected error: {error}").format(error=str(e))))
 
-    def execute_void(self, payment: OrderPayment) -> tuple[bool, str | None]:
+    def execute_void(
+        self, payment: OrderPayment, user: str = "system"
+    ) -> tuple[bool, str | None]:
         """
         Void an authorized transaction.
+
+        Args:
+            payment: The OrderPayment to void.
+            user: The user performing the action (for audit logging).
         """
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
@@ -1066,6 +1136,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 payment.pk,
             )
 
+            # Audit log for successful void
+            payment.order.log_action(
+                "pretix_postfinance.void",
+                data={
+                    "transaction_id": transaction_id,
+                    "user": user,
+                    "success": True,
+                },
+            )
+
             # Fail the payment in pretix (void means the payment won't be captured)
             try:
                 payment.fail(info={"state": TransactionState.VOIDED.value})
@@ -1085,11 +1165,31 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 transaction_id,
                 e,
             )
+            # Audit log for failed void
+            payment.order.log_action(
+                "pretix_postfinance.void.failed",
+                data={
+                    "transaction_id": transaction_id,
+                    "user": user,
+                    "success": False,
+                    "error": str(e),
+                },
+            )
             return (False, str(_("Void failed: {error}").format(error=str(e))))
         except Exception as e:
             logger.exception(
                 "Unexpected error voiding transaction %s: %s",
                 transaction_id,
                 e,
+            )
+            # Audit log for failed void
+            payment.order.log_action(
+                "pretix_postfinance.void.failed",
+                data={
+                    "transaction_id": transaction_id,
+                    "user": user,
+                    "success": False,
+                    "error": str(e),
+                },
             )
             return (False, str(_("Unexpected error: {error}").format(error=str(e))))

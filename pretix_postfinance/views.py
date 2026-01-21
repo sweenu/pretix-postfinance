@@ -389,7 +389,12 @@ class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
         )
 
         provider = payment.payment_provider
-        success, error_message = provider.execute_capture(payment)
+        user = (
+            getattr(request.user, "email", None)
+            or getattr(request.user, "username", None)
+            or str(request.user.pk)
+        )
+        success, error_message = provider.execute_capture(payment, user=user)
 
         if success:
             messages.success(request, str(_("Payment captured successfully.")))
