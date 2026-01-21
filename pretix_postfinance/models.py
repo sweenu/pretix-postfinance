@@ -9,6 +9,16 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 
+class InstallmentStatus(models.TextChoices):
+    """Status choices for installment payments."""
+
+    SCHEDULED = "scheduled", _("Scheduled")
+    PENDING = "pending", _("Pending")
+    PAID = "paid", _("Paid")
+    FAILED = "failed", _("Failed")
+    CANCELLED = "cancelled", _("Cancelled")
+
+
 class InstallmentPlan(models.Model):
     """
     Installment plan configuration for an event.
@@ -97,3 +107,99 @@ class InstallmentPlan(models.Model):
                         "the plan's number of installments"
                     )
                 })
+
+
+class InstallmentSchedule(models.Model):
+    """
+    Individual installment payment schedule for an order.
+
+    Tracks each installment payment in a multi-payment order,
+    including status, due dates, and payment processing details.
+    """
+
+    order = models.ForeignKey(
+        "pretixbase.Order",
+        on_delete=models.CASCADE,
+        related_name="postfinance_installments",
+        verbose_name=_("Order"),
+    )
+
+    payment = models.ForeignKey(
+        "pretixbase.OrderPayment",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="postfinance_installment",
+        verbose_name=_("Payment"),
+        help_text=_("The OrderPayment record for this installment (if paid)"),
+    )
+
+    installment_number = models.IntegerField(
+        verbose_name=_("Installment number"),
+        help_text=_("Sequential number of this installment (1-based)"),
+    )
+
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        verbose_name=_("Amount"),
+        help_text=_("Amount to charge for this installment"),
+    )
+
+    due_date = models.DateField(
+        verbose_name=_("Due date"),
+        help_text=_("Date when this installment payment is due"),
+        db_index=True,
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=InstallmentStatus.choices,
+        default=InstallmentStatus.SCHEDULED,
+        verbose_name=_("Status"),
+        db_index=True,
+    )
+
+    paid_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Paid at"),
+        help_text=_("Timestamp when this installment was successfully paid"),
+    )
+
+    token_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        verbose_name=_("Token ID"),
+        help_text=_("PostFinance payment token ID for charging this installment"),
+    )
+
+    failure_reason = models.TextField(
+        null=True,
+        blank=True,
+        verbose_name=_("Failure reason"),
+        help_text=_("Reason for payment failure (if applicable)"),
+    )
+
+    grace_period_ends = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Grace period ends"),
+        help_text=_("End of grace period for failed payment (3 days after failure)"),
+    )
+
+    class Meta:
+        verbose_name = _("Installment Schedule")
+        verbose_name_plural = _("Installment Schedules")
+        ordering: ClassVar[list[str]] = ["order", "installment_number"]
+        unique_together: ClassVar[list[list[str]]] = [["order", "installment_number"]]
+        indexes: ClassVar[list[models.Index]] = [
+            models.Index(fields=["due_date"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["status", "due_date"]),
+            models.Index(fields=["status", "grace_period_ends"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.order.code} - Installment {self.installment_number}"
