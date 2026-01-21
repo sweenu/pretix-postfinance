@@ -6,6 +6,7 @@ Handles webhook callbacks and admin capture action.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -66,8 +67,24 @@ def webhook(request: HttpRequest) -> HttpResponse:
         entity_id,
     )
 
-    # Validate signature if present
     signature_header = request.headers.get("X-Signature")
+
+    # Security logging helper
+    def _log_security_event(reason: str) -> None:
+        """Log webhook signature failure as security event."""
+        payload_hash = hashlib.sha256(request.body).hexdigest()
+        client_ip = _get_client_ip(request)
+        logger.error(
+            "security.webhook.signature_failure: reason=%s, space_id=%s, entity_id=%s, "
+            "client_ip=%s, payload_hash=%s",
+            reason,
+            space_id,
+            entity_id,
+            client_ip,
+            payload_hash,
+        )
+
+    # Validate signature
     if signature_header:
         client = _get_client_for_space(space_id)
         if client:
@@ -76,13 +93,16 @@ def webhook(request: HttpRequest) -> HttpResponse:
                     signature_header=signature_header,
                     content=request.body.decode("utf-8"),
                 ):
-                    logger.warning(
-                        "PostFinance webhook: invalid signature for spaceId=%s", space_id
-                    )
+                    _log_security_event("invalid_signature")
                     return JsonResponse({"error": "Invalid signature"}, status=401)
             except PostFinanceError as e:
                 logger.error("PostFinance webhook: signature validation error - %s", e)
+                _log_security_event("validation_error")
                 return JsonResponse({"error": "Signature validation error"}, status=401)
+    else:
+        # Signature is required but not present
+        _log_security_event("missing_signature")
+        return JsonResponse({"error": "Signature required"}, status=401)
 
     # Process webhook
     if entity_id:
@@ -91,6 +111,16 @@ def webhook(request: HttpRequest) -> HttpResponse:
             _process_refund_webhook(entity_id, space_id)
 
     return HttpResponse(status=200)
+
+
+def _get_client_ip(request: HttpRequest) -> str:
+    """Extract client IP address, handling reverse proxy headers."""
+    x_forwarded_for = request.headers.get("X-Forwarded-For")
+    if x_forwarded_for:
+        # Take the first IP in the chain (original client)
+        return x_forwarded_for.split(",")[0].strip()
+    remote_addr = request.META.get("REMOTE_ADDR")
+    return remote_addr if remote_addr else "unknown"
 
 
 def _get_client_for_space(space_id: int) -> PostFinanceClient | None:

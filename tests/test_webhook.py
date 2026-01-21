@@ -21,6 +21,15 @@ from pretix_postfinance.api import PostFinanceError
 
 
 @pytest.fixture
+def valid_signature(monkeypatch):
+    """Mock signature validation to always return True."""
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.is_webhook_signature_valid",
+        lambda self, signature_header, content: True,
+    )
+
+
+@pytest.fixture
 def env():
     """Create test environment with organizer, event, order, and user."""
     user = User.objects.create_user("dummy@dummy.dummy", "dummy")
@@ -67,7 +76,7 @@ def get_webhook_payload(entity_id: int, space_id: int = 12345, state: str = "COM
 
 
 @pytest.mark.django_db
-def test_webhook_valid_payload(env, client, monkeypatch):
+def test_webhook_valid_payload(env, client, monkeypatch, valid_signature):
     """Test webhook with valid payload structure."""
     event, order = env
 
@@ -94,13 +103,14 @@ def test_webhook_valid_payload(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(123456)),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
 
 
 @pytest.mark.django_db
-def test_webhook_mark_paid(env, client, monkeypatch):
+def test_webhook_mark_paid(env, client, monkeypatch, valid_signature):
     """Test webhook marking order as paid."""
     event, order = env
     order.status = Order.STATUS_PENDING
@@ -128,6 +138,7 @@ def test_webhook_mark_paid(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(123456)),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -137,7 +148,7 @@ def test_webhook_mark_paid(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_mark_failed(env, client, monkeypatch):
+def test_webhook_mark_failed(env, client, monkeypatch, valid_signature):
     """Test webhook marking payment as failed."""
     event, order = env
     order.status = Order.STATUS_PENDING
@@ -165,6 +176,7 @@ def test_webhook_mark_failed(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(123456, state="FAILED")),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -175,7 +187,7 @@ def test_webhook_mark_failed(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_idempotent_already_confirmed(env, client, monkeypatch):
+def test_webhook_idempotent_already_confirmed(env, client, monkeypatch, valid_signature):
     """Test webhook is idempotent when payment already confirmed."""
     event, order = env
 
@@ -201,6 +213,7 @@ def test_webhook_idempotent_already_confirmed(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(123456)),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -251,7 +264,7 @@ def test_webhook_wrong_content_type(env, client):
 
 
 @pytest.mark.django_db
-def test_webhook_no_matching_payment(env, client, monkeypatch):
+def test_webhook_no_matching_payment(env, client, monkeypatch, valid_signature):
     """Test webhook with no matching payment record."""
     # No payment created, webhook should return 200 but do nothing
 
@@ -259,6 +272,7 @@ def test_webhook_no_matching_payment(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(999999)),  # Non-existent transaction
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     # Should return 200 to prevent retries
@@ -266,7 +280,7 @@ def test_webhook_no_matching_payment(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_refund_state_update(env, client, monkeypatch):
+def test_webhook_refund_state_update(env, client, monkeypatch, valid_signature):
     """Test webhook updating refund state on OrderRefund object."""
     event, order = env
 
@@ -304,6 +318,7 @@ def test_webhook_refund_state_update(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(refund_payload),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -372,7 +387,7 @@ def test_webhook_signature_validation_success(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_pending_to_created_state(env, client, monkeypatch):
+def test_webhook_pending_to_created_state(env, client, monkeypatch, valid_signature):
     """Test webhook updating payment from created to pending state."""
     event, order = env
     order.status = Order.STATUS_PENDING
@@ -400,6 +415,7 @@ def test_webhook_pending_to_created_state(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(123456, state="PENDING")),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -410,7 +426,7 @@ def test_webhook_pending_to_created_state(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_authorized_state_confirms_payment(env, client, monkeypatch):
+def test_webhook_authorized_state_confirms_payment(env, client, monkeypatch, valid_signature):
     """Test webhook with AUTHORIZED state confirms the payment."""
     event, order = env
     order.status = Order.STATUS_PENDING
@@ -438,6 +454,7 @@ def test_webhook_authorized_state_confirms_payment(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(123456, state="AUTHORIZED")),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -447,7 +464,7 @@ def test_webhook_authorized_state_confirms_payment(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_decline_state(env, client, monkeypatch):
+def test_webhook_decline_state(env, client, monkeypatch, valid_signature):
     """Test webhook with DECLINE state fails the payment."""
     event, order = env
     order.status = Order.STATUS_PENDING
@@ -475,6 +492,7 @@ def test_webhook_decline_state(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(123456, state="DECLINE")),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -485,7 +503,7 @@ def test_webhook_decline_state(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_voided_state(env, client, monkeypatch):
+def test_webhook_voided_state(env, client, monkeypatch, valid_signature):
     """Test webhook with VOIDED state fails the payment."""
     event, order = env
     order.status = Order.STATUS_PENDING
@@ -513,6 +531,7 @@ def test_webhook_voided_state(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(get_webhook_payload(123456, state="VOIDED")),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -523,7 +542,7 @@ def test_webhook_voided_state(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_external_refund_added_to_history(env, client, monkeypatch):
+def test_webhook_external_refund_added_to_history(env, client, monkeypatch, valid_signature):
     """Test webhook adds external refund to history."""
     event, order = env
 
@@ -578,6 +597,7 @@ def test_webhook_external_refund_added_to_history(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(refund_payload),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
     assert response.status_code == 200
@@ -590,7 +610,7 @@ def test_webhook_external_refund_added_to_history(env, client, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_webhook_refund_api_error_stores_error(env, client, monkeypatch):
+def test_webhook_refund_api_error_stores_error(env, client, monkeypatch, valid_signature):
     """Test that refund webhook API error is stored in refund.info."""
     event, order = env
     order.status = Order.STATUS_PAID
@@ -626,9 +646,11 @@ def test_webhook_refund_api_error_stores_error(env, client, monkeypatch):
         "/_postfinance/webhook/",
         json.dumps(refund_payload),
         content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
     )
 
-    assert response.status_code == 200
+    # API errors now return 502 to trigger PostFinance retry
+    assert response.status_code == 502
 
     # Check error was stored in refund.info
     with scopes_disabled():
@@ -636,3 +658,67 @@ def test_webhook_refund_api_error_stores_error(env, client, monkeypatch):
         assert refund.info_data.get("error") == "Refund fetch failed"
         assert refund.info_data.get("error_status_code") == 500
         assert refund.info_data.get("error_code") == "SERVER_ERROR"
+
+
+@pytest.mark.django_db
+def test_webhook_transaction_api_error_returns_502(env, client, monkeypatch, valid_signature):
+    """Test that PostFinance API errors for transactions return 502 (retriable)."""
+    event, order = env
+
+    def get_transaction_fail(tid):
+        raise PostFinanceError("API unavailable", status_code=503, error_code="SERVICE_UNAVAILABLE")
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: get_transaction_fail(tid),
+    )
+
+    with scopes_disabled():
+        order.payments.create(
+            provider="postfinance",
+            amount=order.total,
+            info=json.dumps({"transaction_id": 999888}),
+            state=OrderPayment.PAYMENT_STATE_PENDING,
+        )
+
+    payload = get_webhook_payload(999888)
+    response = client.post(
+        "/_postfinance/webhook/",
+        json.dumps(payload),
+        content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
+    )
+
+    # Should return 502 to trigger PostFinance retry
+    assert response.status_code == 502
+
+
+@pytest.mark.django_db
+def test_webhook_no_client_configured_returns_500(env, client, monkeypatch, valid_signature):
+    """Test that missing client configuration returns 500 (configuration error)."""
+    event, order = env
+
+    # Remove the PostFinance settings
+    event.settings.delete("payment_postfinance_space_id")
+    event.settings.delete("payment_postfinance_user_id")
+    event.settings.delete("payment_postfinance_auth_key")
+
+    with scopes_disabled():
+        order.payments.create(
+            provider="postfinance",
+            amount=order.total,
+            info=json.dumps({"transaction_id": 777666}),
+            state=OrderPayment.PAYMENT_STATE_PENDING,
+        )
+
+    # Use a different space_id that has no configuration
+    payload = get_webhook_payload(777666, space_id=99999)
+    response = client.post(
+        "/_postfinance/webhook/",
+        json.dumps(payload),
+        content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
+    )
+
+    # Should return 500 for configuration error
+    assert response.status_code == 500
