@@ -461,7 +461,7 @@ class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
                     "message": str(
                         _(
                             "Webhooks configured successfully! "
-                            "Transaction updates will now be received automatically."
+                            "Transaction updates will be received automatically."
                         )
                     ),
                     "details": result,
