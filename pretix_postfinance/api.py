@@ -208,6 +208,53 @@ class PostFinanceClient:
             logger.error("PostFinance SDK error getting payment method configurations: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
+    def get_card_payment_method_configurations(self) -> list[int]:
+        """
+        Get configuration IDs for card-based payment methods only.
+
+        This is used for installment payments, which require card tokenization
+        and are only supported for card payment methods (Visa, Mastercard,
+        American Express, etc.).
+
+        Returns:
+            List of payment method configuration IDs for card-based methods.
+            Returns empty list if no card methods are configured.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        # Card payment method IDs in PostFinance
+        # These are the standard card payment method IDs used by PostFinance
+        CARD_PAYMENT_METHOD_IDS = {
+            1,  # Visa
+            2,  # Mastercard
+            3,  # American Express
+            6,  # Diners Club
+            7,  # Discover
+            8,  # JCB
+            123,  # Maestro
+            125,  # V PAY
+            152,  # UnionPay
+        }
+
+        configs = self.get_payment_method_configurations()
+        card_config_ids = []
+
+        for config in configs:
+            # Check if this configuration is for a card payment method
+            # payment_method is a PaymentMethod object with an id attribute
+            payment_method_id = (
+                getattr(config.payment_method, "id", None) if config.payment_method else None
+            )
+            if (
+                payment_method_id
+                and payment_method_id in CARD_PAYMENT_METHOD_IDS
+                and config.id is not None
+            ):
+                card_config_ids.append(config.id)
+
+        return card_config_ids
+
     def create_transaction(
         self,
         currency: str,

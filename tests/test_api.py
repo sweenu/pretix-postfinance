@@ -167,6 +167,148 @@ class TestPostFinanceClient:
         assert result == mock_refund
         mock_refunds_instance.get_payment_refunds_id.assert_called_once_with(id=789012, space=12345)
 
+    def test_get_card_payment_method_configurations_filters_cards(self, mock_services):
+        """get_card_payment_method_configurations should filter to card methods only."""
+        from postfinancecheckout.models import CreationEntityState
+
+        # Create mock payment method configurations
+        mock_pm_visa = MagicMock()
+        mock_pm_visa.id = 1  # Visa
+        mock_config_visa = MagicMock()
+        mock_config_visa.id = 101
+        mock_config_visa.payment_method = mock_pm_visa
+        mock_config_visa.state = CreationEntityState.ACTIVE
+
+        mock_pm_mastercard = MagicMock()
+        mock_pm_mastercard.id = 2  # Mastercard
+        mock_config_mastercard = MagicMock()
+        mock_config_mastercard.id = 102
+        mock_config_mastercard.payment_method = mock_pm_mastercard
+        mock_config_mastercard.state = CreationEntityState.ACTIVE
+
+        mock_pm_paypal = MagicMock()
+        mock_pm_paypal.id = 50  # PayPal (not a card)
+        mock_config_paypal = MagicMock()
+        mock_config_paypal.id = 103
+        mock_config_paypal.payment_method = mock_pm_paypal
+        mock_config_paypal.state = CreationEntityState.ACTIVE
+
+        mock_pm_amex = MagicMock()
+        mock_pm_amex.id = 3  # American Express
+        mock_config_amex = MagicMock()
+        mock_config_amex.id = 104
+        mock_config_amex.payment_method = mock_pm_amex
+        mock_config_amex.state = CreationEntityState.ACTIVE
+
+        # Mock the payment method configurations service
+        mock_payment_configs_instance = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [
+            mock_config_visa,
+            mock_config_mastercard,
+            mock_config_paypal,
+            mock_config_amex,
+        ]
+        mock_payment_configs_instance.get_payment_method_configurations.return_value = (
+            mock_response
+        )
+        mock_services["PaymentMethodConfigurationsService"].return_value = (
+            mock_payment_configs_instance
+        )
+
+        client = PostFinanceClient(
+            space_id=12345,
+            user_id=67890,
+            api_secret="test-secret",
+        )
+
+        result = client.get_card_payment_method_configurations()
+
+        # Should only return card payment method configuration IDs (not PayPal)
+        assert result == [101, 102, 104]
+        assert 103 not in result  # PayPal should be filtered out
+
+    def test_get_card_payment_method_configurations_empty_when_no_cards(self, mock_services):
+        """get_card_payment_method_configurations should return empty list when no cards."""
+        from postfinancecheckout.models import CreationEntityState
+
+        # Create mock non-card payment methods
+        mock_pm_paypal = MagicMock()
+        mock_pm_paypal.id = 50  # PayPal
+        mock_config_paypal = MagicMock()
+        mock_config_paypal.id = 103
+        mock_config_paypal.payment_method = mock_pm_paypal
+        mock_config_paypal.state = CreationEntityState.ACTIVE
+
+        mock_pm_sepa = MagicMock()
+        mock_pm_sepa.id = 30  # SEPA
+        mock_config_sepa = MagicMock()
+        mock_config_sepa.id = 104
+        mock_config_sepa.payment_method = mock_pm_sepa
+        mock_config_sepa.state = CreationEntityState.ACTIVE
+
+        # Mock the payment method configurations service
+        mock_payment_configs_instance = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [mock_config_paypal, mock_config_sepa]
+        mock_payment_configs_instance.get_payment_method_configurations.return_value = (
+            mock_response
+        )
+        mock_services["PaymentMethodConfigurationsService"].return_value = (
+            mock_payment_configs_instance
+        )
+
+        client = PostFinanceClient(
+            space_id=12345,
+            user_id=67890,
+            api_secret="test-secret",
+        )
+
+        result = client.get_card_payment_method_configurations()
+
+        # Should return empty list when no card methods are configured
+        assert result == []
+
+    def test_get_card_payment_method_configurations_handles_none_payment_method(
+        self, mock_services
+    ):
+        """get_card_payment_method_configurations should handle configs with None payment_method."""
+        from postfinancecheckout.models import CreationEntityState
+
+        mock_pm_visa = MagicMock()
+        mock_pm_visa.id = 1  # Visa
+        mock_config_visa = MagicMock()
+        mock_config_visa.id = 101
+        mock_config_visa.payment_method = mock_pm_visa
+        mock_config_visa.state = CreationEntityState.ACTIVE
+
+        mock_config_none = MagicMock()
+        mock_config_none.id = 102
+        mock_config_none.payment_method = None  # Invalid/None
+        mock_config_none.state = CreationEntityState.ACTIVE
+
+        # Mock the payment method configurations service
+        mock_payment_configs_instance = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [mock_config_visa, mock_config_none]
+        mock_payment_configs_instance.get_payment_method_configurations.return_value = (
+            mock_response
+        )
+        mock_services["PaymentMethodConfigurationsService"].return_value = (
+            mock_payment_configs_instance
+        )
+
+        client = PostFinanceClient(
+            space_id=12345,
+            user_id=67890,
+            api_secret="test-secret",
+        )
+
+        result = client.get_card_payment_method_configurations()
+
+        # Should only return the valid card config, not the None one
+        assert result == [101]
+
 
 class TestGetTimeout:
     """Tests for _get_timeout function."""
