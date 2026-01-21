@@ -1091,9 +1091,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             return (False, str(_("Unexpected error: {error}").format(error=str(e))))
 
-    def execute_void(
-        self, payment: OrderPayment, user: str = "system"
-    ) -> tuple[bool, str | None]:
+    def execute_void(self, payment: OrderPayment, user: str = "system") -> tuple[bool, str | None]:
         """
         Void an authorized transaction.
 

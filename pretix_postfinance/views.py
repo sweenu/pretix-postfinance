@@ -27,6 +27,11 @@ from .payment import FAILURE_STATES, SUCCESS_STATES
 
 logger = logging.getLogger(__name__)
 
+WEBHOOK_STATUS_NOT_FOUND = "not_found"
+WEBHOOK_STATUS_NO_CLIENT = "no_client"
+WEBHOOK_STATUS_API_ERROR = "api_error"
+WEBHOOK_STATUS_OK = "ok"
+
 
 @csrf_exempt
 @scopes_disabled()
@@ -104,11 +109,28 @@ def webhook(request: HttpRequest) -> HttpResponse:
         _log_security_event("missing_signature")
         return JsonResponse({"error": "Signature required"}, status=401)
 
-    # Process webhook
+    # Process webhook and return appropriate HTTP status code:
+    # - 200: Success or entity not found in our DB (legitimate "not ours" case)
+    # - 500: Configuration error (no client configured for space)
+    # - 502: External API error (PostFinance API call failed, retriable)
     if entity_id:
-        result = _process_transaction_webhook(entity_id, space_id)
-        if result is None:
-            _process_refund_webhook(entity_id, space_id)
+        status, _ = _process_transaction_webhook(entity_id, space_id)
+
+        if status == WEBHOOK_STATUS_NOT_FOUND:
+            # Try refund processing if transaction not found
+            status, _ = _process_refund_webhook(entity_id, space_id)
+
+        if status == WEBHOOK_STATUS_NO_CLIENT:
+            return JsonResponse(
+                {"error": "No PostFinance client configured for this space"},
+                status=500,
+            )
+
+        if status == WEBHOOK_STATUS_API_ERROR:
+            return JsonResponse(
+                {"error": "Failed to fetch entity from PostFinance API"},
+                status=502,
+            )
 
     return HttpResponse(status=200)
 
@@ -157,8 +179,18 @@ def _get_client_for_space(space_id: int) -> PostFinanceClient | None:
     return None
 
 
-def _process_transaction_webhook(entity_id: int, space_id: int) -> bool | None:
-    """Process a transaction state update from webhook."""
+def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bool | None]:
+    """
+    Process a transaction state update from webhook.
+
+    Returns:
+        tuple[str, bool | None]: A tuple of (status, processed) where:
+            - status: WEBHOOK_STATUS_NOT_FOUND (entity not in our DB),
+                      WEBHOOK_STATUS_NO_CLIENT (configuration error),
+                      WEBHOOK_STATUS_API_ERROR (PostFinance API failed),
+                      WEBHOOK_STATUS_OK (processed successfully)
+            - processed: True if state changed, False if no change, None if not applicable
+    """
     payment = None
     for p in OrderPayment.objects.filter(
         provider="postfinance",
@@ -170,18 +202,31 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> bool | None:
             break
 
     if not payment:
-        return None
+        # Entity not found in our database - this webhook isn't for us
+        return (WEBHOOK_STATUS_NOT_FOUND, None)
 
     client = _get_client_for_space(space_id)
     if not client:
-        logger.error("PostFinance webhook: no client for spaceId=%s", space_id)
-        return None
+        # Configuration error - no client configured for this space
+        logger.error(
+            "PostFinance webhook: no client configured for spaceId=%s, transaction=%s",
+            space_id,
+            entity_id,
+        )
+        return (WEBHOOK_STATUS_NO_CLIENT, None)
 
     try:
         transaction = client.get_transaction(int(entity_id))
     except PostFinanceError as e:
-        logger.error("PostFinance webhook: failed to fetch transaction %s: %s", entity_id, e)
-        return None
+        # External API error - PostFinance API call failed
+        logger.error(
+            "PostFinance webhook: failed to fetch transaction %s: %s (status=%s, code=%s)",
+            entity_id,
+            e.message,
+            e.status_code,
+            e.error_code,
+        )
+        return (WEBHOOK_STATUS_API_ERROR, None)
 
     transaction_state = transaction.state
 
@@ -211,7 +256,7 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> bool | None:
         OrderPayment.PAYMENT_STATE_CONFIRMED,
         OrderPayment.PAYMENT_STATE_REFUNDED,
     ):
-        return False
+        return (WEBHOOK_STATUS_OK, False)
 
     if transaction_state in SUCCESS_STATES:
         try:
@@ -219,7 +264,7 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> bool | None:
             logger.info("PostFinance webhook: payment %s confirmed", payment.pk)
         except Exception as e:
             logger.exception("PostFinance webhook: error confirming payment %s: %s", payment.pk, e)
-        return True
+        return (WEBHOOK_STATUS_OK, True)
 
     if transaction_state in FAILURE_STATES:
         payment.state = OrderPayment.PAYMENT_STATE_FAILED
@@ -232,20 +277,30 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> bool | None:
             },
         )
         logger.info("PostFinance webhook: payment %s failed", payment.pk)
-        return True
+        return (WEBHOOK_STATUS_OK, True)
 
     # Handle pending/intermediate states
     if payment.state == OrderPayment.PAYMENT_STATE_CREATED:
         payment.state = OrderPayment.PAYMENT_STATE_PENDING
         payment.save(update_fields=["state"])
         logger.info("PostFinance webhook: payment %s set to pending", payment.pk)
-        return True
+        return (WEBHOOK_STATUS_OK, True)
 
-    return False
+    return (WEBHOOK_STATUS_OK, False)
 
 
-def _process_refund_webhook(entity_id: int, space_id: int) -> bool | None:
-    """Process a refund state update from webhook."""
+def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | None]:
+    """
+    Process a refund state update from webhook.
+
+    Returns:
+        tuple[str, bool | None]: A tuple of (status, processed) where:
+            - status: "not_found" (entity not in our DB),
+                      "no_client" (configuration error),
+                      "api_error" (PostFinance API failed),
+                      "ok" (processed successfully)
+            - processed: True if state changed, False if no change, None if not applicable
+    """
     refund = None
     for r in OrderRefund.objects.filter(
         provider="postfinance",
@@ -257,16 +312,30 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> bool | None:
             break
 
     if not refund:
-        return None
+        # Entity not found in our database - this webhook isn't for us
+        return (WEBHOOK_STATUS_NOT_FOUND, None)
 
     client = _get_client_for_space(space_id)
     if not client:
-        return None
+        # Configuration error - no client configured for this space
+        logger.error(
+            "PostFinance webhook: no client configured for spaceId=%s, refund=%s",
+            space_id,
+            entity_id,
+        )
+        return (WEBHOOK_STATUS_NO_CLIENT, None)
 
     try:
         pf_refund = client.get_refund(int(entity_id))
     except PostFinanceError as e:
-        logger.error("PostFinance webhook: failed to fetch refund %s: %s", entity_id, e)
+        # External API error - PostFinance API call failed
+        logger.error(
+            "PostFinance webhook: failed to fetch refund %s: %s (status=%s, code=%s)",
+            entity_id,
+            e.message,
+            e.status_code,
+            e.error_code,
+        )
         # Store error details in refund.info for admin visibility
         info_data = refund.info_data or {}
         info_data.update(
@@ -278,7 +347,7 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> bool | None:
         )
         refund.info = json.dumps(info_data)
         refund.save(update_fields=["info"])
-        return None
+        return (WEBHOOK_STATUS_API_ERROR, None)
 
     refund_state = pf_refund.state
 
@@ -300,7 +369,7 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> bool | None:
         if refund.state != OrderRefund.REFUND_STATE_DONE:
             refund.done()
             logger.info("PostFinance webhook: refund %s marked done", refund.pk)
-        return True
+        return (WEBHOOK_STATUS_OK, True)
 
     if refund_state and refund_state.value == "FAILED":
         if refund.state not in (OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_FAILED):
@@ -314,9 +383,9 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> bool | None:
                 },
             )
             logger.info("PostFinance webhook: refund %s failed", refund.pk)
-        return True
+        return (WEBHOOK_STATUS_OK, True)
 
-    return False
+    return (WEBHOOK_STATUS_OK, False)
 
 
 class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):
