@@ -17,6 +17,8 @@ from django_scopes import scopes_disabled
 from postfinancecheckout.models import TransactionState
 from pretix.base.models import Event, Order, OrderPayment, OrderRefund, Organizer, Team, User
 
+from pretix_postfinance.api import PostFinanceError
+
 
 @pytest.fixture
 def env():
@@ -585,3 +587,52 @@ def test_webhook_external_refund_added_to_history(env, client, monkeypatch):
         payment.refresh_from_db()
         refund_history = payment.info_data.get("refund_history", [])
         assert len(refund_history) >= 1
+
+
+@pytest.mark.django_db
+def test_webhook_refund_api_error_stores_error(env, client, monkeypatch):
+    """Test that refund webhook API error is stored in refund.info."""
+    event, order = env
+    order.status = Order.STATUS_PAID
+    order.save()
+
+    def get_refund_fail(refund_id):
+        raise PostFinanceError("Refund fetch failed", status_code=500, error_code="SERVER_ERROR")
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_refund",
+        lambda self, rid: get_refund_fail(rid),
+    )
+
+    with scopes_disabled():
+        payment = order.payments.create(
+            provider="postfinance",
+            amount=order.total,
+            info=json.dumps({"transaction_id": 123456}),
+            state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+        )
+
+        refund = order.refunds.create(
+            provider="postfinance",
+            amount=order.total,
+            payment=payment,
+            info=json.dumps({"refund_id": 789012}),
+        )
+
+    # Send webhook for this refund
+    refund_payload = get_webhook_payload(789012)
+
+    response = client.post(
+        "/_postfinance/webhook/",
+        json.dumps(refund_payload),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+
+    # Check error was stored in refund.info
+    with scopes_disabled():
+        refund.refresh_from_db()
+        assert refund.info_data.get("error") == "Refund fetch failed"
+        assert refund.info_data.get("error_status_code") == 500
+        assert refund.info_data.get("error_code") == "SERVER_ERROR"

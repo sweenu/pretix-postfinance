@@ -857,6 +857,17 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 transaction_id,
                 e,
             )
+            # Store error details in refund.info for admin visibility
+            info_data = refund.info_data or {}
+            info_data.update(
+                {
+                    "error": str(e),
+                    "error_code": e.error_code,
+                    "error_status_code": e.status_code,
+                }
+            )
+            refund.info = json.dumps(info_data)
+            refund.save(update_fields=["info"])
             raise PaymentException(_("Refund failed: {error}").format(error=str(e))) from e
 
     def api_payment_details(self, payment: OrderPayment) -> dict:
@@ -876,12 +887,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Return refund details for the REST API.
         """
         info_data = refund.info_data or {}
-        return {
+        result = {
             "refund_id": info_data.get("refund_id"),
             "state": info_data.get("state"),
             "amount": info_data.get("amount"),
             "created_on": info_data.get("created_on"),
         }
+        # Include error fields if present
+        if info_data.get("error"):
+            result["error"] = info_data.get("error")
+            result["error_code"] = info_data.get("error_code")
+            result["error_status_code"] = info_data.get("error_status_code")
+        return result
 
     def matching_id(self, payment: OrderPayment) -> str | None:
         """

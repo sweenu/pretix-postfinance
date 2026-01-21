@@ -392,6 +392,9 @@ def test_refund_api_error(env, factory, monkeypatch):
 
     refund.refresh_from_db()
     assert refund.state != OrderRefund.REFUND_STATE_DONE
+    # Verify error details are stored in refund.info
+    assert refund.info_data.get("error") == "Refund failed"
+    assert refund.info_data.get("error_status_code") == 400
 
 
 @pytest.mark.django_db
@@ -732,6 +735,45 @@ def test_api_refund_details(env):
     assert details["state"] == "SUCCESSFUL"
     assert details["amount"] == 13.37
     assert details["created_on"] == "2026-01-13T11:00:00Z"
+
+
+@pytest.mark.django_db
+def test_api_refund_details_with_error(env):
+    """Test api_refund_details includes error fields when present."""
+    event, order = env
+
+    order.status = Order.STATUS_PAID
+    order.save()
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"transaction_id": 123456}),
+    )
+
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+        info=json.dumps(
+            {
+                "refund_id": 789012,
+                "state": "FAILED",
+                "error": "Refund rejected",
+                "error_code": "INSUFFICIENT_FUNDS",
+                "error_status_code": 400,
+            }
+        ),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    details = prov.api_refund_details(refund)
+
+    assert details["refund_id"] == 789012
+    assert details["state"] == "FAILED"
+    assert details["error"] == "Refund rejected"
+    assert details["error_code"] == "INSUFFICIENT_FUNDS"
+    assert details["error_status_code"] == 400
 
 
 @pytest.mark.django_db

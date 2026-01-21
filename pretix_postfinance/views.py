@@ -237,6 +237,17 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> bool | None:
         pf_refund = client.get_refund(int(entity_id))
     except PostFinanceError as e:
         logger.error("PostFinance webhook: failed to fetch refund %s: %s", entity_id, e)
+        # Store error details in refund.info for admin visibility
+        info_data = refund.info_data or {}
+        info_data.update(
+            {
+                "error": str(e),
+                "error_code": e.error_code,
+                "error_status_code": e.status_code,
+            }
+        )
+        refund.info = json.dumps(info_data)
+        refund.save(update_fields=["info"])
         return None
 
     refund_state = pf_refund.state
