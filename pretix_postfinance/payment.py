@@ -26,6 +26,7 @@ from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .api import PostFinanceClient, PostFinanceError
+from .models import InstallmentSchedule
 
 if TYPE_CHECKING:
     from pretix.base.models import Order
@@ -942,6 +943,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Render customer-facing instructions on how to proceed with a pending payment.
         """
         info_data = payment.info_data or {}
+
+        # Check if this payment has an installment schedule
+        installment_schedule = []
+        if hasattr(payment.order, 'installment_schedule'):
+            installment_schedule = payment.order.installment_schedule.filter(
+                status__in=[
+                    InstallmentSchedule.Status.SCHEDULED,
+                    InstallmentSchedule.Status.PAID,
+                    InstallmentSchedule.Status.FAILED,
+                ]
+            ).order_by('installment_number')
+
         template = get_template("pretixplugins/postfinance/pending.html")
         ctx = {
             "request": request,
@@ -951,6 +964,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             "payment_info": info_data,
             "transaction_id": info_data.get("transaction_id"),
             "state": info_data.get("state"),
+            "has_installments": len(installment_schedule) > 0,
+            "installment_schedule": installment_schedule,
         }
         return template.render(ctx)
 

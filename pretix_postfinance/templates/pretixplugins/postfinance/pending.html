@@ -22,6 +22,68 @@
     <p>{% trans "Transaction reference" %}: <code>{{ transaction_id }}</code></p>
 {% endif %}
 
+{% if has_installments %}
+    <div class="panel panel-info" style="margin-top: 20px;">
+        <div class="panel-heading">
+            <h3 class="panel-title">{% trans "Your Installment Payment Plan" %}</h3>
+        </div>
+        <div class="panel-body">
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>{% trans "Installment" %}</th>
+                        <th>{% trans "Amount" %}</th>
+                        <th>{% trans "Due Date" %}</th>
+                        <th>{% trans "Status" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for installment in installment_schedule %}
+                    <tr>
+                        <td>{{ installment.installment_number }}</td>
+                        <td>{{ installment.amount }} {{ order.event.currency }}</td>
+                        <td>{{ installment.due_date }}</td>
+                        <td>
+                            {% if installment.status == "PAID" %}
+                                <span class="label label-success">{% trans "Paid" %}</span>
+                            {% elif installment.status == "SCHEDULED" %}
+                                <span class="label label-warning">{% trans "Scheduled" %}</span>
+                            {% elif installment.status == "FAILED" %}
+                                <span class="label label-danger">{% trans "Failed" %}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            {% if installment_schedule %}
+                {% with paid_count=installment_schedule|length as total_count=installment_schedule|length %}
+                    {% for installment in installment_schedule %}
+                        {% if installment.status == "PAID" %}
+                            {% widthratio paid_count 1 100 %}
+                        {% endif %}
+                    {% endfor %}
+                {% endwith %}
+            {% endif %}
+
+            <div class="alert alert-info">
+                <p>
+                    {% blocktrans trimmed %}
+                        <strong>Next Payment:</strong> The next installment will be automatically charged 
+                        on the due date shown above.
+                    {% endblocktrans %}
+                </p>
+                <p>
+                    {% blocktrans trimmed %}
+                        <strong>Payment Method:</strong> Your saved card will be charged automatically.
+                    {% endblocktrans %}
+                </p>
+            </div>
+        </div>
+    </div>
+{% endif %}
+
 <div class="alert alert-info" style="margin-top: 15px;">
     <strong>{% trans "What happens next?" %}</strong>
     <ul style="margin: 10px 0 0 0;">
