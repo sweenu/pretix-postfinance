@@ -15,6 +15,7 @@ from django.contrib import messages
 from django.core.mail import send_mail
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
@@ -509,6 +510,283 @@ class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
             event=request.event.slug,
             code=order.code,
         )
+
+
+class PostFinanceRetryInstallmentView(EventPermissionRequiredMixin, View):
+    """
+    Handle manual retry requests for failed installment payments.
+
+    This view allows event organizers to manually retry a failed installment payment
+    by attempting to charge the saved token again.
+    """
+
+    permission = "can_change_orders"
+
+    def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        """
+        Retry a failed installment payment.
+        """
+        order = get_object_or_404(Order, code=kwargs["order"], event=request.event)
+        installment = get_object_or_404(
+            InstallmentSchedule,
+            pk=kwargs["installment"],
+            order=order
+        )
+
+        # Check if this installment can be retried
+        if installment.status != InstallmentSchedule.Status.FAILED:
+            messages.error(
+                request,
+                str(_("Only failed installments can be retried."))
+            )
+            return redirect(
+                "control:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+
+        if not installment.token_id:
+            messages.error(
+                request,
+                str(_("No payment token available for this installment."))
+            )
+            return redirect(
+                "control:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+
+        try:
+            # Get the payment provider
+            providers = request.event.get_payment_providers()
+            provider = providers.get("postfinance")
+
+            if not provider:
+                messages.error(
+                    request,
+                    str(_("PostFinance payment provider not found."))
+                )
+                return redirect(
+                    "control:event.order",
+                    organizer=request.event.organizer.slug,
+                    event=request.event.slug,
+                    code=order.code,
+                )
+
+            client = provider._get_client()
+
+            # Attempt to charge the token
+            from postfinancecheckout.models import LineItemCreate, LineItemType
+            line_item = LineItemCreate(
+                name=(
+                    f"Installment {installment.installment_number} "
+                    f"of {installment.num_installments}"
+                ),
+                quantity=1,
+                amountIncludingTax=float(installment.amount),
+                type=LineItemType.PRODUCT,
+                uniqueId=f"installment-{installment.pk}",
+            )
+
+            merchant_reference = f"pretix-installment-{order.code}-{installment.installment_number}"
+
+            # Charge the token
+            transaction = client.charge_token(
+                token_id=int(installment.token_id),
+                amount=float(installment.amount),
+                currency=request.event.currency,
+                merchant_reference=merchant_reference,
+                line_items=[line_item],
+            )
+
+            if not transaction or not transaction.id:
+                messages.error(
+                    request,
+                    str(_("Failed to create transaction for installment retry."))
+                )
+                return redirect(
+                    "control:event.order",
+                    organizer=request.event.organizer.slug,
+                    event=request.event.slug,
+                    code=order.code,
+                )
+
+            transaction_state = transaction.state
+            success_states = {
+                "AUTHORIZED",
+                "COMPLETED",
+                "FULFILL",
+                "CONFIRMED",
+                "PROCESSING",
+            }
+            if transaction_state and transaction_state.value in success_states:
+                # Payment successful - update installment status
+                installment.status = InstallmentSchedule.Status.PAID
+                installment.paid_at = now()
+                installment.failure_reason = None
+                installment.grace_period_ends = None
+                installment.save()
+
+                # Create OrderPayment for this installment
+                from pretix.base.models import OrderPayment
+                order_payment = OrderPayment(
+                    order=order,
+                    amount=installment.amount,
+                    provider="postfinance",
+                    payment_date=now(),
+                    state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+                    info_data={
+                        "transaction_id": transaction.id,
+                        "state": transaction_state.value if transaction_state else None,
+                        "installment_number": installment.installment_number,
+                        "installment_id": installment.pk,
+                    },
+                )
+                order_payment.save()
+
+                # Link the payment to the installment
+                installment.payment = order_payment
+                installment.save()
+
+                # Log the action
+                user = (
+                    getattr(request.user, "email", None)
+                    or getattr(request.user, "username", None)
+                    or str(request.user.pk)
+                )
+                order.log_action(
+                    "pretix_postfinance.installment.retry.success",
+                    data={
+                        "installment_number": installment.installment_number,
+                        "amount": str(installment.amount),
+                        "transaction_id": transaction.id,
+                        "user": user,
+                    },
+                )
+
+                messages.success(
+                    request,
+                    str(
+                        _(
+                            "Installment {number} payment retried successfully. "
+                            "Transaction ID: {transaction_id}"
+                        ).format(
+                            number=installment.installment_number,
+                            transaction_id=transaction.id,
+                        )
+                    ),
+                )
+
+                # Send success email to customer
+                self._send_installment_success_email(order, installment, transaction)
+
+            else:
+                # Payment failed - update failure reason
+                failure_reason = str(_("Manual retry failed"))
+                if transaction_state:
+                    failure_reason = f"{failure_reason}: {transaction_state.value}"
+
+                installment.failure_reason = failure_reason
+                installment.save()
+
+                # Log the failure
+                user = (
+                    getattr(request.user, "email", None)
+                    or getattr(request.user, "username", None)
+                    or str(request.user.pk)
+                )
+                order.log_action(
+                    "pretix_postfinance.installment.retry.failed",
+                    data={
+                        "installment_number": installment.installment_number,
+                        "amount": str(installment.amount),
+                        "failure_reason": failure_reason,
+                        "user": user,
+                    },
+                )
+
+                messages.error(
+                    request,
+                    str(
+                        _(
+                            "Installment {number} payment retry failed: {reason}"
+                        ).format(
+                            number=installment.installment_number,
+                            reason=failure_reason,
+                        )
+                    ),
+                )
+
+        except PostFinanceError as e:
+            logger.exception("PostFinance API error during installment retry: %s", e)
+            messages.error(
+                request,
+                str(
+                    _("Payment service error during installment retry: {error}")
+                ).format(error=str(e)),
+            )
+        except Exception as e:
+            logger.exception("Unexpected error during installment retry: %s", e)
+            messages.error(
+                request,
+                str(_("An unexpected error occurred during installment retry.")),
+            )
+
+        return redirect(
+            "control:event.order",
+            organizer=request.event.organizer.slug,
+            event=request.event.slug,
+            code=order.code,
+        )
+
+    def _send_installment_success_email(
+        self, order: Order, installment: InstallmentSchedule, transaction: Any
+    ) -> None:
+        """
+        Send success email to customer about installment payment.
+        """
+        try:
+            event = order.event
+            subject = f"Installment Payment Successful - {event.name}"
+
+            message = f"""Dear Customer,
+
+Your installment payment for order {order.code} has been successfully processed.
+
+Event: {event.name}
+Order: {order.code}
+Installment: {installment.installment_number} of {installment.num_installments}
+Amount: {installment.amount} {event.currency}
+Date: {now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Thank you for your payment.
+
+Best regards,
+{event.organizer.name}
+"""
+
+            send_mail(
+                subject,
+                message,
+                f"noreply@{event.organizer.slug}.pretix.example.com",
+                [order.email],
+                fail_silently=True,
+            )
+
+            logger.info(
+                "Sent installment success email for order %s, installment %s",
+                order.code,
+                installment.installment_number,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to send installment success email for order %s: %s",
+                order.code,
+                e,
+            )
 
 
 class PostFinanceUpdatePaymentMethodView(EventPermissionRequiredMixin, View):

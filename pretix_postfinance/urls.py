@@ -40,4 +40,10 @@ urlpatterns = [
         views.PostFinanceCaptureView.as_view(),
         name="postfinance.capture",
     ),
+    re_path(
+        r"^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/postfinance/retry-installment/"
+        r"(?P<order>[^/]+)/(?P<installment>\d+)/$",
+        views.PostFinanceRetryInstallmentView.as_view(),
+        name="postfinance.retry_installment",
+    ),
 ]

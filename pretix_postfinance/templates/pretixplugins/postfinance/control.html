@@ -62,6 +62,7 @@
                     <th>{% trans "Status" %}</th>
                     <th>{% trans "Paid At" %}</th>
                     <th>{% trans "Token ID" %}</th>
+                    <th>{% trans "Actions" %}</th>
                 </tr>
             </thead>
             <tbody>
@@ -106,6 +107,22 @@
                                 {{ installment.token_id|slice:":6" }}...
                             {% else %}
                                 -
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if installment.status == "failed" and installment.token_id %}
+                                <form action="{% url 'plugins:pretix_postfinance:postfinance.retry_installment' 
+                                    organizer=request.event.organizer.slug 
+                                    event=request.event.slug 
+                                    order=installment.order.code 
+                                    installment=installment.pk %}" 
+                                    method="POST" style="display: inline;">
+                                    {% csrf_token %}
+                                    <button type="submit" class="btn btn-sm btn-warning" 
+                                            title="{% trans 'Retry this failed installment payment' %}">
+                                        {% trans "Retry" %}
+                                    </button>
+                                </form>
                             {% endif %}
                         </td>
                     </tr>
