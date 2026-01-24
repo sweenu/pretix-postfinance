@@ -680,12 +680,42 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         to summarize what will happen during payment.
         """
         template = get_template("pretixplugins/postfinance/checkout_payment_confirm.html")
+
+        # Check if this is an installment payment
+        num_installments = None
+        if request.POST:
+            num_installments_str = request.POST.get("num_installments")
+            if num_installments_str:
+                try:
+                    num_installments = int(num_installments_str)
+                except ValueError:
+                    num_installments = None
+
         ctx = {
             "request": request,
             "event": self.event,
             "provider": self,
             "description": self.settings.get("description"),
+            "is_installment_payment": num_installments is not None and num_installments > 1,
+            "num_installments": num_installments,
         }
+
+        # If this is an installment payment, calculate and show the schedule
+        if ctx["is_installment_payment"] and order and num_installments:
+            from .installments import calculate_installment_schedule
+
+            try:
+                schedule = calculate_installment_schedule(
+                    order.total,
+                    num_installments,
+                    now().date()
+                )
+                ctx["installment_schedule"] = schedule
+                ctx["first_installment_amount"] = schedule[0][1] if schedule else None
+            except Exception as e:
+                logger.error("Failed to calculate installment schedule for confirmation: %s", e)
+                ctx["is_installment_payment"] = False
+
         return template.render(ctx)
 
     def _handle_installment_payment(

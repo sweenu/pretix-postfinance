@@ -13,3 +13,66 @@
     <dt>{% trans "Payment method" %}</dt>
     <dd>{{ provider.public_name }}</dd>
 </dl>
+
+{% if is_installment_payment %}
+    <div class="panel panel-info" style="margin-top: 20px;">
+        <div class="panel-heading">
+            <h3 class="panel-title">{% trans "Installment Payment Plan" %}</h3>
+        </div>
+        <div class="panel-body">
+            <p>
+                {% blocktrans trimmed %}
+                    You have chosen to pay for your order in {{ num_installments }} monthly installments.
+                {% endblocktrans %}
+            </p>
+
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>{% trans "Installment" %}</th>
+                        <th>{% trans "Amount" %}</th>
+                        <th>{% trans "Due Date" %}</th>
+                        <th>{% trans "Status" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for installment in installment_schedule %}
+                    <tr>
+                        <td>{{ installment.0 }}</td>
+                        <td>{{ installment.1 }} {{ event.currency }}</td>
+                        <td>{{ installment.2 }}</td>
+                        <td>
+                            {% if forloop.first %}
+                                {% trans "First payment (today)" %}
+                            {% else %}
+                                {% trans "Scheduled" %}
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <div class="alert alert-info">
+                <p>
+                    {% blocktrans trimmed %}
+                        <strong>First Payment:</strong> {{ first_installment_amount }} {{ event.currency }} will be charged today.
+                    {% endblocktrans %}
+                </p>
+                <p>
+                    {% blocktrans trimmed %}
+                        <strong>Subsequent Payments:</strong> Remaining installments will be automatically charged 
+                        on their due dates to your saved payment method.
+                    {% endblocktrans %}
+                </p>
+            </div>
+
+            <p>
+                {% blocktrans trimmed %}
+                    By proceeding with this order, you agree to the installment payment terms and authorize 
+                    automatic charges on the scheduled dates.
+                {% endblocktrans %}
+            </p>
+        </div>
+    </div>
+{% endif %}
