@@ -15,6 +15,7 @@ from postfinancecheckout.exceptions import ApiException
 from postfinancecheckout.models import (
     CreationEntityState,
     LineItemCreate,
+    LineItemType,
     PaymentMethodConfiguration,
     Refund,
     RefundCreate,
@@ -272,29 +273,36 @@ class PostFinanceClient:
     ) -> Transaction:
         """
         Charge a saved token for subsequent installment payments.
-        
+
         Args:
             token_id: The PostFinance token ID to charge.
             amount: The amount to charge.
             currency: The three-letter currency code (e.g., 'CHF', 'EUR').
             merchant_reference: Optional merchant reference for this transaction.
-        
+
         Returns:
             The created Transaction object with the charge result.
-        
+
         Raises:
             PostFinanceError: If the request fails.
         """
         try:
+            # Create a minimal line item for the charge amount
+            line_item = LineItemCreate(
+                name="Installment Payment",
+                quantity=1,
+                amountIncludingTax=amount,
+                type=LineItemType.PRODUCT,
+                uniqueId="installment-payment",
+            )
+
             transaction_create = TransactionCreate(
                 currency=currency,
-                token=token_id,
+                lineItems=[line_item],
+                token=int(token_id) if token_id else None,
                 merchantReference=merchant_reference,
-                # For token-based charges, we need to set the amount explicitly
-                # This is done through line items, but for simplicity we'll use
-                # the amount parameter and let PostFinance handle the details
             )
-            
+
             return self._transactions_service.post_payment_transactions(
                 space=self.space_id,
                 transaction_create=transaction_create,
