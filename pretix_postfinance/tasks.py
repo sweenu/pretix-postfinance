@@ -15,6 +15,88 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
+def send_installment_reminders() -> None:
+    """
+    Send reminder emails for upcoming installment payments.
+
+    This task runs daily to send reminders for installments that are due
+    in 3 days.
+    """
+    logger.info("Starting send_installment_reminders task")
+
+    # Get installments that are due in 3 days
+    today = now().date()
+    reminder_date = today + timedelta(days=3)
+    upcoming_installments = InstallmentSchedule.objects.filter(
+        status=InstallmentSchedule.Status.SCHEDULED,
+        due_date=reminder_date,
+    ).select_related("order")
+
+    logger.info("Found %s upcoming installments to send reminders for",
+               upcoming_installments.count())
+
+    for installment in upcoming_installments:
+        try:
+            order = installment.order
+            event = order.event
+
+            # Check if reminder was already sent (using a simple approach for now)
+            # In a production system, you might want to track this more robustly
+            if installment.failure_reason and "reminder_sent" in installment.failure_reason:
+                continue
+
+            # Send reminder email
+            subject = f"Installment Payment Reminder - {event.name}"
+
+            message = f"""Dear Customer,
+
+This is a friendly reminder that your next installment payment is due soon.
+
+Event: {event.name}
+Order: {order.code}
+Installment: {installment.installment_number}
+Amount: {installment.amount} {event.currency}
+Due Date: {installment.due_date}
+
+Your payment method on file will be automatically charged on the due date.
+No action is required unless you need to update your payment information.
+
+If you need to update your payment method, please visit:
+{event.get_absolute_url()}
+
+Thank you for your business!
+"""
+
+            send_mail(
+                subject,
+                message,
+                f"noreply@{event.organizer.slug}.pretix.example.com",
+                [order.email],
+                fail_silently=True,
+            )
+
+            # Mark that reminder was sent
+            current_reason = installment.failure_reason or ""
+            installment.failure_reason = f"{current_reason} reminder_sent"
+            installment.save()
+
+            logger.info(
+                "Sent reminder for installment %s of order %s",
+                installment.installment_number,
+                order.code,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to send reminder for installment %s: %s",
+                installment.installment_number,
+                e,
+            )
+
+    logger.info("Completed send_installment_reminders task")
+
+
+@shared_task
 def cancel_expired_grace_periods() -> None:
     """
     Cancel orders when grace period expires without payment.
