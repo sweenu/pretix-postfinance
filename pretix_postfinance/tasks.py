@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Any
 
 from celery import shared_task
 from django.core.mail import send_mail
@@ -11,6 +12,131 @@ from .api import PostFinanceError
 from .models import InstallmentSchedule
 
 logger = logging.getLogger(__name__)
+
+
+@shared_task
+def cancel_expired_grace_periods() -> None:
+    """
+    Cancel orders when grace period expires without payment.
+
+    This task runs daily to handle installments where the grace period
+    has expired without successful payment.
+    """
+    logger.info("Starting cancel_expired_grace_periods task")
+
+    # Get failed installments where grace period has expired
+    now_time = now()
+    expired_installments = InstallmentSchedule.objects.filter(
+        status=InstallmentSchedule.Status.FAILED,
+        grace_period_ends__lte=now_time,
+    ).select_related("order")
+
+    logger.info("Found %s expired installments to process", expired_installments.count())
+
+    # Group by order to process all installments for each order together
+    orders_to_cancel = {}
+    for installment in expired_installments:
+        order_id = installment.order.id
+        if order_id not in orders_to_cancel:
+            orders_to_cancel[order_id] = []
+        orders_to_cancel[order_id].append(installment)
+
+    for order_id, installments in orders_to_cancel.items():
+        try:
+            order = installments[0].order
+            event = order.event
+
+            logger.info(
+                "Processing order %s with %s expired installments",
+                order.code,
+                len(installments),
+            )
+
+            # Cancel all remaining scheduled installments for this order
+            remaining_installments = InstallmentSchedule.objects.filter(
+                order=order,
+                status__in=[
+                    InstallmentSchedule.Status.SCHEDULED,
+                    InstallmentSchedule.Status.FAILED,
+                ],
+            )
+
+            for remaining_installment in remaining_installments:
+                remaining_installment.status = InstallmentSchedule.Status.CANCELLED
+                remaining_installment.save()
+
+            # Process refunds for paid installments
+            paid_installments = InstallmentSchedule.objects.filter(
+                order=order,
+                status=InstallmentSchedule.Status.PAID,
+            ).order_by("installment_number")
+
+            total_paid = sum(
+                float(installment.amount) for installment in paid_installments
+            )
+
+            if total_paid > 0:
+                # Create refund for all paid installments
+                from pretix.base.models import OrderRefund
+
+                refund = OrderRefund.objects.create(
+                    order=order,
+                    amount=total_paid,
+                    provider="postfinance",
+                    state="created",
+                )
+
+                # Get payment provider to execute refund
+                provider = event.get_payment_provider("postfinance")
+                if provider:
+                    try:
+                        provider.execute_refund(refund, user="system")
+                    except Exception as e:
+                        logger.error(
+                            "Failed to execute refund for order %s: %s",
+                            order.code,
+                            e,
+                        )
+
+            # Update order status appropriately
+            if order.status in ["pending", "paid"]:
+                order.status = "canceled"
+                order.save()
+
+            # Create audit log entry
+            order.log_action(
+                "pretix_postfinance.installment.cancelled",
+                data={
+                    "reason": "Grace period expired",
+                    "failed_installments": [
+                        {
+                            "installment_number": inst.installment_number,
+                            "amount": str(inst.amount),
+                            "failure_reason": inst.failure_reason,
+                        }
+                        for inst in installments
+                    ],
+                    "total_paid": str(total_paid),
+                    "refund_amount": str(total_paid),
+                },
+            )
+
+            logger.info(
+                "Cancelled order %s due to expired grace period",
+                order.code,
+            )
+
+            # Send cancellation email to customer
+            _send_installment_order_cancelled_email(order, installments, total_paid)
+
+        except Exception as e:
+            logger.exception(
+                "Error processing order %s for grace period expiration: %s",
+                order_id,
+                e,
+            )
+
+    logger.info("Completed cancel_expired_grace_periods task")
 
 
 @shared_task
@@ -406,5 +532,55 @@ The payment will be automatically retried until the grace period ends.
         logger.error(
             "Failed to send organizer notification for installment %s: %s",
             installment.installment_number,
+            e,
+        )
+
+
+def _send_installment_order_cancelled_email(
+    order: Any, installments: list[InstallmentSchedule], total_paid: float
+) -> None:
+    """Send email to customer when order is cancelled due to expired grace period."""
+    try:
+        event = order.event
+
+        subject = f"Order Cancelled - {event.name}"
+
+        # Build failed installments list
+        failed_list = "\n".join(
+            f"- Installment {inst.installment_number}: {inst.amount} "
+            f"{event.currency} (Reason: {inst.failure_reason})"
+            for inst in installments
+        )
+
+        message = f"""Dear Customer,
+
+We regret to inform you that your order {order.code} has been cancelled
+due to failed installment payments.
+
+Event: {event.name}
+Order: {order.code}
+
+Failed Installments:
+{failed_list}
+
+Total Amount Paid: {total_paid} {event.currency}
+Refund Status: A refund for the paid amount has been initiated
+
+We apologize for any inconvenience. You may place a new order if you
+still wish to attend the event.
+"""
+
+        send_mail(
+            subject,
+            message,
+            f"noreply@{event.organizer.slug}.pretix.example.com",
+            [order.email],
+            fail_silently=True,
+        )
+
+    except Exception as e:
+        logger.error(
+            "Failed to send order cancellation email for order %s: %s",
+            order.code,
             e,
         )
