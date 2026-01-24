@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any
 
 from django import forms
@@ -1091,6 +1091,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Execute a refund for an order.
 
         This is called by pretix when a refund needs to be processed.
+        For installment orders, this handles partial refunds and cancels future installments.
 
         Args:
             refund: The OrderRefund to process.
@@ -1123,49 +1124,79 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             external_id = f"pretix-refund-{refund.order.code}-R-{refund.local_id}"
             merchant_reference = f"pretix-{self.event.slug}-{refund.order.code}-R-{refund.local_id}"
 
-            postfinance_refund = client.refund_transaction(
-                transaction_id=int(transaction_id),
-                external_id=external_id,
-                merchant_reference=merchant_reference,
-                amount=float(refund.amount),
-            )
+            # Check if this is an installment payment
+            is_installment_payment = False
+            installment_schedule = []
+            try:
+                from .models import InstallmentSchedule
+                installments = InstallmentSchedule.objects.filter(
+                    order=payment.order
+                ).order_by("installment_number")
+                if installments.exists():
+                    is_installment_payment = True
+                    installment_schedule = list(installments)
+            except Exception:
+                # If there's any error accessing installment schedule, continue without it
+                pass
 
-            # Store refund info on the OrderRefund object
-            refund.info = json.dumps(
-                {
-                    "refund_id": postfinance_refund.id,
-                    "state": postfinance_refund.state.value if postfinance_refund.state else None,
-                    "amount": float(postfinance_refund.amount)
-                    if postfinance_refund.amount
-                    else None,
-                    "created_on": str(postfinance_refund.created_on)
-                    if postfinance_refund.created_on
-                    else None,
-                }
-            )
-            refund.save(update_fields=["info"])
+            if is_installment_payment:
+                # Handle installment payment refund logic
+                self._handle_installment_refund(
+                    refund, installment_schedule, client, external_id, merchant_reference
+                )
+            else:
+                # Regular (non-installment) refund
+                postfinance_refund = client.refund_transaction(
+                    transaction_id=int(transaction_id),
+                    external_id=external_id,
+                    merchant_reference=merchant_reference,
+                    amount=float(refund.amount),
+                )
 
-            # Mark refund as done
-            refund.done()
+                # Store refund info on the OrderRefund object
+                refund.info = json.dumps(
+                    {
+                        "refund_id": postfinance_refund.id,
+                        "state": (
+                            postfinance_refund.state.value
+                            if postfinance_refund.state
+                            else None
+                        ),
+                        "amount": (
+                            float(postfinance_refund.amount)
+                            if postfinance_refund.amount
+                            else None
+                        ),
+                        "created_on": (
+                            str(postfinance_refund.created_on)
+                            if postfinance_refund.created_on
+                            else None
+                        ),
+                    }
+                )
+                refund.save(update_fields=["info"])
 
-            logger.info(
-                "PostFinance refund %s created for payment %s (amount %s)",
-                postfinance_refund.id,
-                payment.pk,
-                refund.amount,
-            )
+                # Mark refund as done
+                refund.done()
 
-            # Audit log for successful refund
-            refund.order.log_action(
-                "pretix_postfinance.refund",
-                data={
-                    "transaction_id": transaction_id,
-                    "refund_id": postfinance_refund.id,
-                    "amount": str(refund.amount),
-                    "user": user,
-                    "success": True,
-                },
-            )
+                logger.info(
+                    "PostFinance refund %s created for payment %s (amount %s)",
+                    postfinance_refund.id,
+                    payment.pk,
+                    refund.amount,
+                )
+
+                # Audit log for successful refund
+                refund.order.log_action(
+                    "pretix_postfinance.refund",
+                    data={
+                        "transaction_id": transaction_id,
+                        "refund_id": postfinance_refund.id,
+                        "amount": str(refund.amount),
+                        "user": user,
+                        "success": True,
+                    },
+                )
 
         except PostFinanceError as e:
             logger.exception(
@@ -1197,6 +1228,201 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 },
             )
             raise PaymentException(_("Refund failed: {error}").format(error=str(e))) from e
+
+    def _handle_installment_refund(
+        self,
+        refund: OrderRefund,
+        installment_schedule: list,
+        client: PostFinanceClient,
+        external_id: str,
+        merchant_reference: str,
+    ) -> None:
+        """
+        Handle refund logic for installment payments.
+
+        This method implements the special refund handling for installment orders:
+        - Only refunds amounts that have actually been paid
+        - Cancels all future scheduled installments
+        - Adjusts remaining installments if refund amount < paid amount
+        - Handles over-refund scenarios appropriately
+
+        Args:
+            refund: The OrderRefund to process.
+            installment_schedule: List of InstallmentSchedule objects for this order.
+            client: PostFinance API client.
+            external_id: Unique external ID for idempotency.
+            merchant_reference: Merchant reference for the refund.
+        """
+        from .models import InstallmentSchedule
+
+        payment = refund.payment
+        order = payment.order
+
+        # Calculate total paid amount from installments
+        paid_amount = Decimal("0.00")
+        for installment in installment_schedule:
+            if installment.status == InstallmentSchedule.Status.PAID:
+                paid_amount += installment.amount
+
+        # Calculate total scheduled amount (future installments)
+        scheduled_amount = Decimal("0.00")
+        for installment in installment_schedule:
+            if installment.status == InstallmentSchedule.Status.SCHEDULED:
+                scheduled_amount += installment.amount
+
+        logger.info(
+            "Processing installment refund: paid=%s, scheduled=%s, refund_amount=%s",
+            paid_amount,
+            scheduled_amount,
+            refund.amount,
+        )
+
+        # Determine refund strategy based on amounts
+        refund_amount = refund.amount
+
+        # Case 1: Refund amount exceeds paid amount - handle gracefully
+        if refund_amount > paid_amount:
+            logger.warning(
+                "Refund amount %s exceeds paid amount %s for installment order %s",
+                refund_amount,
+                paid_amount,
+                order.code,
+            )
+            # Cap refund at paid amount to avoid over-refunding
+            refund_amount = paid_amount
+
+        # Case 2: Refund amount equals or exceeds paid amount - refund everything and cancel all
+        if refund_amount >= paid_amount:
+            # Refund the full paid amount
+            actual_refund_amount = paid_amount
+
+            # Cancel all future installments
+            for installment in installment_schedule:
+                if installment.status == InstallmentSchedule.Status.SCHEDULED:
+                    installment.status = InstallmentSchedule.Status.CANCELLED
+                    installment.save()
+
+        # Case 3: Refund amount is less than paid amount - partial refund
+        else:
+            # Refund the requested amount
+            actual_refund_amount = refund_amount
+
+            # Calculate remaining amount after refund
+            remaining_paid = paid_amount - refund_amount
+
+            # If there are scheduled installments, adjust them to account for the refund
+            if scheduled_amount > 0 and remaining_paid > 0:
+                # Calculate total remaining amount to be paid (remaining_paid + scheduled_amount)
+                total_remaining = remaining_paid + scheduled_amount
+
+                # Calculate ratio to distribute the remaining_paid across scheduled installments
+                if total_remaining > 0:
+                    ratio = remaining_paid / total_remaining
+
+                    # Adjust scheduled installments proportionally
+                    for installment in installment_schedule:
+                        if installment.status == InstallmentSchedule.Status.SCHEDULED:
+                            # Calculate new amount for this installment
+                            new_amount = installment.amount + (installment.amount * ratio)
+                            # Round to 2 decimal places
+                            new_amount = new_amount.quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                            installment.amount = new_amount
+                            installment.save()
+
+                            # Update the remaining_paid amount
+                            remaining_paid -= (new_amount - installment.amount)
+                            if remaining_paid <= 0:
+                                break
+            else:
+                # No scheduled installments or no remaining paid amount
+                # Just cancel all future installments
+                for installment in installment_schedule:
+                    if installment.status == InstallmentSchedule.Status.SCHEDULED:
+                        installment.status = InstallmentSchedule.Status.CANCELLED
+                        installment.save()
+
+        # Create the actual refund through PostFinance
+        postfinance_refund = client.refund_transaction(
+            transaction_id=int(payment.info_data.get("transaction_id")),
+            external_id=external_id,
+            merchant_reference=merchant_reference,
+            amount=float(actual_refund_amount),
+        )
+
+        # Store refund info on the OrderRefund object
+        refund.info = json.dumps(
+            {
+                "refund_id": postfinance_refund.id,
+                "state": (
+                    postfinance_refund.state.value
+                    if postfinance_refund.state
+                    else None
+                ),
+                "amount": (
+                    float(postfinance_refund.amount)
+                    if postfinance_refund.amount
+                    else None
+                ),
+                "created_on": (
+                    str(postfinance_refund.created_on)
+                    if postfinance_refund.created_on
+                    else None
+                ),
+                "installment_refund_strategy": (
+                    "partial"
+                    if actual_refund_amount < paid_amount
+                    else "full"
+                ),
+                "original_paid_amount": str(paid_amount),
+                "refunded_amount": str(actual_refund_amount),
+            }
+        )
+        refund.save(update_fields=["info"])
+
+        # Mark refund as done
+        refund.done()
+
+        # Update payment info_data with installment schedule changes
+        payment.info_data["installment_schedule"] = {
+            "num_installments": (
+                installment_schedule[0].num_installments
+                if installment_schedule
+                else 0
+            ),
+            "schedule": [
+                {
+                    "installment_number": record.installment_number,
+                    "amount": str(record.amount),
+                    "due_date": str(record.due_date),
+                    "status": record.status,
+                }
+                for record in installment_schedule
+            ],
+        }
+        payment.save(update_fields=["info"])
+
+        logger.info(
+            "Installment refund processed: refund_id=%s, amount=%s, strategy=%s",
+            postfinance_refund.id,
+            actual_refund_amount,
+            "partial" if actual_refund_amount < paid_amount else "full",
+        )
+
+        # Audit log for successful installment refund
+        refund.order.log_action(
+            "pretix_postfinance.refund.installment",
+            data={
+                "refund_id": postfinance_refund.id,
+                "amount": str(actual_refund_amount),
+                "user": "system",  # Default to system user for installment refunds
+                "success": True,
+                "strategy": "partial" if actual_refund_amount < paid_amount else "full",
+                "original_paid_amount": str(paid_amount),
+                "scheduled_amount": str(scheduled_amount),
+            },
+        )
 
     def api_payment_details(self, payment: OrderPayment) -> dict:
         """
