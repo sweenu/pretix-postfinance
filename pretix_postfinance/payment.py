@@ -11,6 +11,7 @@ from django.contrib import messages
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
+from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 from postfinancecheckout.models import (
     LineItemCreate,
@@ -623,6 +624,51 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 str(_("An unexpected error occurred. Please try again.")),
             )
             return False
+
+    def payment_form_render(
+        self, request: HttpRequest, total: Decimal | None = None
+    ) -> str:
+        """
+        Render the payment form for installment options.
+
+        This displays the installment selection interface during checkout
+        when installments are enabled and the order qualifies.
+        """
+        # Check if installments are enabled and order qualifies
+        if not self.settings.get("enable_installments", False):
+            return ""
+
+        if total is None or total < self.settings.get("installments_min_amount", Decimal("50.00")):
+            return ""
+
+        # Calculate maximum installments available
+        from .installments import get_max_installments
+
+        event_date = self.event.get_date_from()
+        if not event_date:
+            return ""
+
+        max_installments = get_max_installments(
+            event_date=event_date,
+            start_date=now().date(),
+            organizer_max=self.settings.get("installments_max_count"),
+        )
+
+        if max_installments < 2:
+            return ""
+
+        # Render the installment selection form
+        template = get_template("pretixplugins/postfinance/installment_selection.html")
+        ctx = {
+            "request": request,
+            "event": self.event,
+            "provider": self,
+            "total": total,
+            "max_installments": max_installments,
+            "min_installments": 2,
+            "currency": self.event.currency,
+        }
+        return template.render(ctx)
 
     def checkout_confirm_render(
         self, request: HttpRequest, order: Order | None = None, info_data: dict | None = None

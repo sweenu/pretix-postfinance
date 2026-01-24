@@ -1,0 +1,187 @@
+{% load i18n static %}
+
+<div class="panel panel-default" id="installment-selection-panel">
+    <div class="panel-heading">
+        <h3 class="panel-title">{% trans "Installment Payment Options" %}</h3>
+    </div>
+    
+    <div class="panel-body">
+        <div class="alert alert-info">
+            <p>
+                {% blocktrans trimmed %}
+                    You can pay for your order in monthly installments using a credit card.
+                    All installments will be automatically charged to your saved payment method.
+                {% endblocktrans %}
+            </p>
+        </div>
+
+        <div class="form-group">
+            <label for="installment-count">{% trans "Number of Installments" %}:</label>
+            <div class="input-group">
+                <input type="range" 
+                       class="form-control" 
+                       id="installment-count" 
+                       name="num_installments" 
+                       min="2" 
+                       max="{{ max_installments }}" 
+                       value="2" 
+                       oninput="updateInstallmentPreview(this.value)">
+                <span class="input-group-addon" id="installment-count-value">2</span>
+            </div>
+        </div>
+
+        <div id="installment-preview" class="well well-sm">
+            <h4>{% trans "Payment Preview" %}</h4>
+            <div id="installment-details"></div>
+        </div>
+
+        <div class="checkbox">
+            <label>
+                <input type="checkbox" 
+                       name="accept_installment_terms" 
+                       id="accept-installment-terms" 
+                       required>
+                {% blocktrans trimmed %}
+                    I agree to the <a href="#" data-toggle="modal" data-target="#installment-terms-modal">{% trans "installment payment terms" %}</a>
+                {% endblocktrans %}
+            </label>
+        </div>
+
+        <div class="form-group">
+            <button type="button" 
+                    class="btn btn-primary" 
+                    onclick="toggleInstallmentSelection()">
+                {% trans "Pay in Full Instead" %}
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Installment Terms Modal -->
+<div class="modal fade" id="installment-terms-modal" tabindex="-1" role="dialog">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+                <h4 class="modal-title">{% trans "Installment Payment Terms" %}</h4>
+            </div>
+            <div class="modal-body">
+                <h4>{% trans "Automatic Payments" %}</h4>
+                <p>
+                    {% blocktrans trimmed %}
+                        By choosing installment payments, you authorize us to automatically charge your 
+                        saved payment method on the scheduled due dates. You will receive email notifications 
+                        before each charge.
+                    {% endblocktrans %}
+                </p>
+
+                <h4>{% trans "Grace Period" %}</h4>
+                <p>
+                    {% blocktrans trimmed %}
+                        If a payment fails, you will have a 3-day grace period to resolve the issue. 
+                        We will automatically retry the payment during this period. If the payment 
+                        continues to fail after the grace period, your order may be cancelled.
+                    {% endblocktrans %}
+                </p>
+
+                <h4>{% trans "Cancellation Policy" %}</h4>
+                <p>
+                    {% blocktrans trimmed %}
+                        If your order is cancelled due to failed payments, any amounts already paid 
+                        will be refunded to your original payment method.
+                    {% endblocktrans %}
+                </p>
+
+                <h4>{% trans "Your Responsibilities" %}</h4>
+                <ul>
+                    <li>{% trans "Ensure your payment method is valid and has sufficient funds" %}</li>
+                    <li>{% trans "Update your payment information if your card expires or is replaced" %}</li>
+                    <li>{% trans "Monitor your email for payment notifications and reminders" %}</li>
+                </ul>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">{% trans "Close" %}</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Update installment preview when slider changes
+    function updateInstallmentPreview(count) {
+        const total = {{ total }};
+        const currency = "{{ currency }}";
+        const startDate = new Date();
+        
+        // Calculate installment amount
+        const installmentAmount = (total / count).toFixed(2);
+        
+        // Build preview HTML
+        let html = `<p><strong>${gettext('Monthly Installment')}:</strong> ${installmentAmount} ${currency}</p>`;
+        html += `<p><strong>${gettext('Total Amount')}:</strong> ${total} ${currency}</p>`;
+        html += `<p><strong>${gettext('Number of Payments')}:</strong> ${count}</p>`;
+        
+        html += `<h5>${gettext('Payment Schedule')}</h5>`;
+        html += `<ul>`;
+        
+        for (let i = 1; i <= count; i++) {
+            const dueDate = new Date(startDate);
+            dueDate.setDate(startDate.getDate() + (i-1) * 30);
+            const dateStr = dueDate.toLocaleDateString();
+            
+            if (i === 1) {
+                html += `<li>${gettext('Payment 1')}: ${installmentAmount} ${currency} (${gettext('Today')})</li>`;
+            } else {
+                html += `<li>${gettext('Payment')} ${i}: ${installmentAmount} ${currency} (${dateStr})</li>`;
+            }
+        }
+        
+        html += `</ul>`;
+        
+        document.getElementById('installment-details').innerHTML = html;
+        document.getElementById('installment-count-value').textContent = count;
+    }
+    
+    // Toggle between installment and full payment
+    function toggleInstallmentSelection() {
+        const panel = document.getElementById('installment-selection-panel');
+        const checkbox = document.getElementById('accept-installment-terms');
+        
+        if (panel.style.display === 'none') {
+            panel.style.display = 'block';
+            checkbox.required = true;
+        } else {
+            panel.style.display = 'none';
+            checkbox.required = false;
+            checkbox.checked = false;
+        }
+    }
+    
+    // Initialize preview
+    document.addEventListener('DOMContentLoaded', function() {
+        updateInstallmentPreview(2);
+    });
+</script>
+
+<style>
+    #installment-selection-panel {
+        margin: 20px 0;
+    }
+    
+    #installment-count {
+        width: 100%;
+    }
+    
+    #installment-preview {
+        margin: 15px 0;
+        padding: 15px;
+        background-color: #f8f9fa;
+    }
+    
+    #installment-preview ul {
+        margin: 10px 0;
+        padding-left: 20px;
+    }
+</style>
