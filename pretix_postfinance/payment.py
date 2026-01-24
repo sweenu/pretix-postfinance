@@ -272,6 +272,46 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         ),
                     ),
                 ),
+                (
+                    "enable_installments",
+                    forms.BooleanField(
+                        label=_("Enable Installment Payments"),
+                        help_text=_(
+                            "Allow customers to pay for their orders in multiple monthly "
+                            "installments. Requires card payment methods and tokenization."
+                        ),
+                        required=False,
+                        initial=False,
+                    ),
+                ),
+                (
+                    "installments_min_amount",
+                    forms.DecimalField(
+                        label=_("Minimum Order Amount for Installments"),
+                        help_text=_(
+                            "Minimum order total required to show installment payment option. "
+                            "Orders below this amount will only show regular payment methods."
+                        ),
+                        min_value=Decimal("10.00"),
+                        max_digits=10,
+                        decimal_places=2,
+                        required=True,
+                        initial=Decimal("50.00"),
+                    ),
+                ),
+                (
+                    "installments_max_count",
+                    forms.IntegerField(
+                        label=_("Maximum Number of Installments"),
+                        help_text=_(
+                            "Optional limit on the maximum number of installments. "
+                            "Leave empty to use system maximum (12). Minimum: 2, Maximum: 12."
+                        ),
+                        min_value=2,
+                        max_value=12,
+                        required=False,
+                    ),
+                ),
             ]
         )
         return d
@@ -468,6 +508,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         # Fresh start - clear any stale transaction ID from previous attempts
         request.session.pop("payment_postfinance_transaction_id", None)
 
+        # Check if this is an installment payment
+        num_installments = None
+        if request.POST:
+            num_installments_str = request.POST.get("num_installments")
+            if num_installments_str:
+                try:
+                    num_installments = int(num_installments_str)
+                    if num_installments < 2 or num_installments > 12:
+                        num_installments = None
+                except ValueError:
+                    num_installments = None
+
         try:
             client = self._get_client()
             currency = self.event.currency
@@ -497,6 +549,19 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # Parse allowed payment method configurations
             allowed_payment_methods = self._parse_allowed_payment_methods()
 
+            # For installment payments, filter to card-only payment methods
+            tokenization_mode = None
+            if num_installments:
+                card_payment_methods = client.get_card_payment_method_configurations()
+                if card_payment_methods:
+                    allowed_payment_methods = card_payment_methods
+                    # Set tokenization mode for installment payments
+                    from postfinancecheckout.models import TokenizationMode
+                    tokenization_mode = TokenizationMode.FORCE_CREATION
+                else:
+                    # No card payment methods available, can't do installments
+                    num_installments = None
+
             transaction = client.create_transaction(
                 currency=currency,
                 line_items=line_items,
@@ -505,6 +570,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 merchant_reference=merchant_reference,
                 completion_behavior=completion_behavior,
                 allowed_payment_method_configurations=allowed_payment_methods,
+                tokenization_mode=tokenization_mode,
             )
 
             transaction_id = transaction.id
@@ -517,6 +583,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 return False
 
             request.session["payment_postfinance_transaction_id"] = transaction_id
+            # Store num_installments in session for later use in execute_payment
+            if num_installments:
+                request.session["payment_postfinance_num_installments"] = num_installments
             logger.info(
                 "Created PostFinance transaction %s for event %s",
                 transaction_id,
@@ -573,6 +642,111 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         }
         return template.render(ctx)
 
+    def _handle_installment_payment(
+        self, payment: OrderPayment, transaction: Any, num_installments: int
+    ) -> None:
+        """
+        Handle installment payment after successful first payment.
+
+        Creates the installment schedule and stores token information.
+
+        Args:
+            payment: The OrderPayment object for the first installment.
+            transaction: The PostFinance transaction object.
+            num_installments: The total number of installments.
+        """
+        from datetime import date
+
+        from .installments import calculate_installment_schedule
+        from .models import InstallmentSchedule
+
+        # Get token ID from transaction
+        token_id = None
+        if transaction.token and transaction.token.id:
+            token_id = str(transaction.token.id)
+
+        if not token_id:
+            logger.warning(
+                "No token found in transaction %s for installment payment",
+                transaction.id,
+            )
+            return
+
+        # Calculate installment schedule
+        total_amount = payment.amount
+        start_date = date.today()  # First installment is today
+
+        try:
+            schedule = calculate_installment_schedule(
+                total_amount, num_installments, start_date
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to calculate installment schedule for payment %s: %s",
+                payment.pk,
+                e,
+            )
+            return
+
+        # Create InstallmentSchedule records
+        created_schedules = []
+        for installment_number, amount, due_date in schedule:
+            status = (
+                InstallmentSchedule.Status.PAID
+                if installment_number == 1
+                else InstallmentSchedule.Status.SCHEDULED
+            )
+
+            installment_payment = None
+            if installment_number == 1:
+                # First installment is the current payment
+                installment_payment = payment
+
+            schedule_record = InstallmentSchedule(
+                order=payment.order,
+                payment=installment_payment,
+                installment_number=installment_number,
+                amount=amount,
+                due_date=due_date,
+                status=status,
+                paid_at=date.today() if installment_number == 1 else None,
+                token_id=token_id if installment_number > 1 else None,
+                num_installments=num_installments,
+            )
+            created_schedules.append(schedule_record)
+
+        # Bulk create the schedule records
+        try:
+            InstallmentSchedule.objects.bulk_create(created_schedules)
+            logger.info(
+                "Created installment schedule for payment %s: %s installments",
+                payment.pk,
+                num_installments,
+            )
+
+            # Store installment metadata in payment info_data
+            payment.info_data["installment_schedule"] = {
+                "num_installments": num_installments,
+                "token_id": token_id,
+                "schedule": [
+                    {
+                        "installment_number": record.installment_number,
+                        "amount": str(record.amount),
+                        "due_date": str(record.due_date),
+                        "status": record.status,
+                    }
+                    for record in created_schedules
+                ],
+            }
+            payment.save(update_fields=["info"])
+
+        except Exception as e:
+            logger.exception(
+                "Failed to create installment schedule records for payment %s: %s",
+                payment.pk,
+                e,
+            )
+
     def execute_payment(self, request: HttpRequest, payment: OrderPayment) -> str | None:
         """
         Execute the payment after the order is confirmed.
@@ -623,6 +797,13 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         payment.pk,
                         state,
                     )
+
+                    # Handle installment payments
+                    num_installments = request.session.get("payment_postfinance_num_installments")
+                    if num_installments:
+                        self._handle_installment_payment(
+                            payment, transaction, num_installments
+                        )
                 except Exception as e:
                     logger.exception(
                         "Error confirming payment %s: %s",
@@ -676,6 +857,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         finally:
             # Always clean up session, whether success or failure
             request.session.pop("payment_postfinance_transaction_id", None)
+            request.session.pop("payment_postfinance_num_installments", None)
 
         return None
 
