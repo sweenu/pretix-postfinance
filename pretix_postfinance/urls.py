@@ -8,9 +8,19 @@ from django.urls import path, re_path
 
 from . import views
 
-# No customer-facing event patterns needed - PostFinance redirects
-# back to pretix checkout steps directly
-event_patterns: list[Any] = []
+# Customer-facing event patterns for installment payment updates
+event_patterns: list[Any] = [
+    path(
+        "postfinance/update-payment-method/<str:order>/",
+        views.PostFinanceUpdatePaymentMethodView.as_view(),
+        name="postfinance.update_payment_method",
+    ),
+    path(
+        "postfinance/update-payment-method-return/<str:order>/",
+        views.PostFinanceUpdatePaymentMethodView.as_view(),
+        name="postfinance.update_payment_method_return",
+    ),
+]
 
 urlpatterns = [
     path("_postfinance/webhook/", views.webhook, name="postfinance.webhook"),

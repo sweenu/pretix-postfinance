@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from django.contrib import messages
+from django.core.mail import send_mail
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.utils.translation import gettext_lazy as _
@@ -20,9 +21,11 @@ from django.views.decorators.csrf import csrf_exempt
 from django_scopes import scopes_disabled
 from pretix.base.models import Order, OrderPayment, OrderRefund
 from pretix.control.permissions import EventPermissionRequiredMixin
+from pretix.multidomain.urlreverse import build_absolute_uri
 
 from ._types import PretixHttpRequest
 from .api import PostFinanceClient, PostFinanceError
+from .models import InstallmentSchedule
 from .payment import FAILURE_STATES, SUCCESS_STATES
 
 logger = logging.getLogger(__name__)
@@ -506,3 +509,335 @@ class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
             event=request.event.slug,
             code=order.code,
         )
+
+
+class PostFinanceUpdatePaymentMethodView(EventPermissionRequiredMixin, View):
+    """
+    Handle customer requests to update their payment method for future installments.
+
+    This view creates a token update transaction with PostFinance and redirects
+    the customer to update their payment method. After they return, it updates
+    the token on all pending installments.
+    """
+
+    permission = "can_view_orders"
+
+    def get(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        """
+        Create a token update transaction and redirect customer to PostFinance.
+        """
+        order = get_object_or_404(Order, code=kwargs["order"], event=request.event)
+
+        # Check if this order has installments
+        installments = InstallmentSchedule.objects.filter(order=order)
+        if not installments.exists():
+            messages.error(
+                request,
+                str(_("This order does not have installment payments."))
+            )
+            return redirect(
+                "presale:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+
+        # Check if there are any pending installments that need a token
+        pending_installments = installments.filter(
+            status__in=[InstallmentSchedule.Status.SCHEDULED, InstallmentSchedule.Status.PENDING]
+        )
+        if not pending_installments.exists():
+            messages.info(
+                request,
+                str(_("All installments have been processed. No payment method update needed."))
+            )
+            return redirect(
+                "presale:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+
+        try:
+            # Get the payment provider
+            providers = request.event.get_payment_providers()
+            provider = providers.get("postfinance")
+
+            if not provider:
+                messages.error(
+                    request,
+                    str(_("PostFinance payment provider not found."))
+                )
+                return redirect(
+                    "presale:event.order",
+                    organizer=request.event.organizer.slug,
+                    event=request.event.slug,
+                    code=order.code,
+                )
+
+            # Create a token update transaction
+            client = provider._get_client()
+
+            # Create a minimal line item with amount 0 for token update
+            from postfinancecheckout.models import LineItemCreate, LineItemType
+            line_item = LineItemCreate(
+                name="Payment Method Update",
+                quantity=1,
+                amountIncludingTax=0.0,
+                type=LineItemType.PRODUCT,
+                uniqueId="payment-method-update",
+            )
+
+            # Create merchant reference for token update transaction
+            merchant_reference = f"pretix-update-token-{order.code}"
+
+            # Create transaction for token update
+            from postfinancecheckout.models import TokenizationMode
+            transaction = client.create_transaction(
+                currency=request.event.currency,
+                line_items=[line_item],
+                success_url=build_absolute_uri(
+                    request.event,
+                    "plugins:pretix_postfinance:postfinance.update_payment_method_return",
+                    kwargs={"order": order.code},
+                ),
+                failed_url=build_absolute_uri(
+                    request.event,
+                    "presale:event.order",
+                    kwargs={
+                        "organizer": request.event.organizer.slug,
+                        "event": request.event.slug,
+                        "code": order.code,
+                    },
+                ),
+                merchant_reference=merchant_reference,
+                # Force token creation for the update
+                tokenization_mode=TokenizationMode.FORCE_CREATION,
+            )
+
+            if not transaction.id:
+                messages.error(
+                    request,
+                    str(_("Failed to create token update transaction."))
+                )
+                return redirect(
+                    "presale:event.order",
+                    organizer=request.event.organizer.slug,
+                    event=request.event.slug,
+                    code=order.code,
+                )
+
+            # Store transaction ID in session for the return handler
+            request.session["payment_postfinance_token_update_transaction_id"] = transaction.id
+            request.session["payment_postfinance_token_update_order_code"] = order.code
+
+            # Get payment page URL
+            payment_page_url = client.get_payment_page_url(transaction.id)
+            if not payment_page_url:
+                messages.error(
+                    request,
+                    str(_("Failed to get payment page URL."))
+                )
+                return redirect(
+                    "presale:event.order",
+                    organizer=request.event.organizer.slug,
+                    event=request.event.slug,
+                    code=order.code,
+                )
+
+            logger.info(
+                "Created token update transaction %s for order %s",
+                transaction.id,
+                order.code,
+            )
+
+            return redirect(payment_page_url)
+
+        except PostFinanceError as e:
+            logger.exception("PostFinance API error during token update: %s", e)
+            messages.error(
+                request,
+                str(_("Payment service error. Please try again later."))
+            )
+            return redirect(
+                "presale:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+        except Exception as e:
+            logger.exception("Unexpected error during token update: %s", e)
+            messages.error(
+                request,
+                str(_("An unexpected error occurred. Please try again."))
+            )
+            return redirect(
+                "presale:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+
+    def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        """
+        Handle the return from PostFinance after token update.
+        """
+        order = get_object_or_404(Order, code=kwargs["order"], event=request.event)
+
+        # Get transaction ID from session
+        transaction_id = request.session.pop(
+            "payment_postfinance_token_update_transaction_id", None
+        )
+        if not transaction_id:
+            messages.error(
+                request,
+                str(_("Token update session expired. Please try again."))
+            )
+            return redirect(
+                "presale:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+
+        try:
+            # Get the payment provider
+            providers = request.event.get_payment_providers()
+            provider = providers.get("postfinance")
+
+            if not provider:
+                messages.error(
+                    request,
+                    str(_("PostFinance payment provider not found."))
+                )
+                return redirect(
+                    "presale:event.order",
+                    organizer=request.event.organizer.slug,
+                    event=request.event.slug,
+                    code=order.code,
+                )
+
+            client = provider._get_client()
+
+            # Fetch the transaction to get the new token
+            transaction = client.get_transaction(int(transaction_id))
+
+            if not transaction.token or not transaction.token.id:
+                messages.error(
+                    request,
+                    str(_("Failed to retrieve new payment token."))
+                )
+                return redirect(
+                    "presale:event.order",
+                    organizer=request.event.organizer.slug,
+                    event=request.event.slug,
+                    code=order.code,
+                )
+
+            new_token_id = str(transaction.token.id)
+
+            # Update all pending installments with the new token
+            pending_installments = InstallmentSchedule.objects.filter(
+                order=order,
+                status__in=[
+                    InstallmentSchedule.Status.SCHEDULED,
+                    InstallmentSchedule.Status.PENDING,
+                ],
+            )
+
+            updated_count = pending_installments.update(token_id=new_token_id)
+
+            logger.info(
+                "Updated %s pending installments with new token %s for order %s",
+                updated_count,
+                new_token_id,
+                order.code,
+            )
+
+            # Send confirmation email
+            self._send_token_update_confirmation(order, new_token_id)
+
+            messages.success(
+                request,
+                str(
+                    _(
+                        "Payment method updated successfully. "
+                        "Future installments will use your new payment method."
+                    )
+                ),
+            )
+
+            return redirect(
+                "presale:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+
+        except PostFinanceError as e:
+            logger.exception("PostFinance API error during token update return: %s", e)
+            messages.error(
+                request,
+                str(_("Payment service error. Please try again later."))
+            )
+            return redirect(
+                "presale:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+        except Exception as e:
+            logger.exception("Unexpected error during token update return: %s", e)
+            messages.error(
+                request,
+                str(_("An unexpected error occurred. Please try again."))
+            )
+            return redirect(
+                "presale:event.order",
+                organizer=request.event.organizer.slug,
+                event=request.event.slug,
+                code=order.code,
+            )
+
+    def _send_token_update_confirmation(self, order: Order, new_token_id: str) -> None:
+        """
+        Send confirmation email to customer about payment method update.
+        """
+        try:
+            event = order.event
+            subject = f"Payment Method Updated - {event.name}"
+
+            message = f"""Dear Customer,
+
+Your payment method for order {order.code} has been successfully updated.
+
+Event: {event.name}
+Order: {order.code}
+
+All future installment payments will be charged to your new payment method.
+
+If you did not initiate this change, please contact our support team immediately.
+
+Thank you,
+{event.organizer.name}
+"""
+
+            send_mail(
+                subject,
+                message,
+                f"noreply@{event.organizer.slug}.pretix.example.com",
+                [order.email],
+                fail_silently=True,
+            )
+
+            logger.info(
+                "Sent token update confirmation email for order %s",
+                order.code,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to send token update confirmation for order %s: %s",
+                order.code,
+                e,
+            )
