@@ -14,6 +14,137 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
+def retry_failed_installments() -> None:
+    """
+    Retry failed installment payments during grace period.
+
+    This task runs daily to retry installments that failed but are still
+    within their grace period.
+    """
+    logger.info("Starting retry_failed_installments task")
+
+    # Get failed installments that are still within grace period
+    now_time = now()
+    failed_installments = InstallmentSchedule.objects.filter(
+        status=InstallmentSchedule.Status.FAILED,
+        grace_period_ends__gt=now_time,
+    ).select_related("order")
+
+    logger.info("Found %s failed installments to retry", failed_installments.count())
+
+    for installment in failed_installments:
+        try:
+            # Get the event settings to create PostFinance client
+            event = installment.order.event
+            provider = event.get_payment_provider("postfinance")
+            if not provider:
+                logger.warning(
+                    "No PostFinance provider configured for event %s",
+                    event.slug,
+                )
+                continue
+
+            # Create PostFinance client
+            client = provider._get_client()
+
+            # Charge the token
+            merchant_reference = (
+                f"pretix-{event.slug}-installment-{installment.installment_number}-retry"
+            )
+            transaction = client.charge_token(
+                token_id=installment.token_id or "",
+                amount=float(installment.amount),
+                currency=event.currency,
+                merchant_reference=merchant_reference,
+            )
+
+            # Check transaction state
+            if transaction.state in {
+                "AUTHORIZED",
+                "COMPLETED",
+                "FULFILL",
+                "CONFIRMED",
+                "PROCESSING",
+            }:
+                # Payment successful
+                installment.status = InstallmentSchedule.Status.PAID
+                installment.paid_at = now()
+                installment.grace_period_ends = None
+                installment.failure_reason = ""
+                installment.save()
+
+                # Create OrderPayment record
+                from pretix.base.models import OrderPayment
+
+                OrderPayment.objects.create(
+                    order=installment.order,
+                    amount=installment.amount,
+                    payment_date=now(),
+                    provider="postfinance",
+                    state="confirmed",
+                    info_data={
+                        "transaction_id": transaction.id,
+                        "state": (
+                            transaction.state.value
+                            if transaction.state
+                            else None
+                        ),
+                        "installment_number": installment.installment_number,
+                        "type": "installment",
+                        "retry": True,
+                    },
+                )
+
+                logger.info(
+                    "Successfully retried installment %s for order %s",
+                    installment.installment_number,
+                    installment.order.code,
+                )
+
+                # Send confirmation email to customer
+                _send_installment_payment_success_email(installment)
+
+            else:
+                # Payment still failing
+                logger.warning(
+                    "Retry failed for installment %s for order %s: %s",
+                    installment.installment_number,
+                    installment.order.code,
+                    transaction.state,
+                )
+
+                # Update failure reason but keep grace period
+                installment.failure_reason = (
+                    f"Retry failed - PostFinance transaction state: {transaction.state}"
+                )
+                installment.save()
+
+        except PostFinanceError as e:
+            logger.error(
+                "PostFinance API error retrying installment %s: %s",
+                installment.installment_number,
+                e,
+            )
+
+            # Update failure reason but keep grace period
+            installment.failure_reason = f"Retry failed - {e!s}"
+            installment.save()
+
+        except Exception as e:
+            logger.exception(
+                "Unexpected error retrying installment %s: %s",
+                installment.installment_number,
+                e,
+            )
+
+            # Update failure reason but keep grace period
+            installment.failure_reason = f"Retry failed - {e!s}"
+            installment.save()
+
+    logger.info("Completed retry_failed_installments task")
+
+
+@shared_task
 def process_due_installments() -> None:
     """
     Process due installments by charging saved tokens.
