@@ -1,0 +1,100 @@
+{% extends "pretixbase/email/base.html" %}
+
+{% load i18n %}
+{% load static %}
+
+{% block title %}
+    {% trans "Order Cancelled Due to Payment Failure" %}
+{% endblock %}
+
+{% block content %}
+    <h2 style="color: #d32f2f;">{% trans "Order Cancelled Due to Payment Failure" %}</h2>
+
+    <p>
+        {% blocktrans trimmed %}
+            Dear {{ order.email }},
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            We regret to inform you that your order {{ order.code }} has been cancelled due to failed installment payments.
+        {% endblocktrans %}
+    </p>
+
+    <table style="width: 100%; margin: 20px 0;">
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Event" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ event.name }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Order" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ order.code }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Total Amount Paid" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ total_paid }} {{ event.currency }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Refund Status" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{% trans "Refund initiated for paid amount" %}</td>
+        </tr>
+    </table>
+
+    <h3>{% trans "Failed Installments" %}</h3>
+    <table style="width: 100%; margin: 20px 0;">
+        <thead>
+            <tr>
+                <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: left;">{% trans "Installment" %}</th>
+                <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: left;">{% trans "Amount" %}</th>
+                <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: left;">{% trans "Reason" %}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for installment in installments %}
+            <tr>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.installment_number }}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.amount }} {{ event.currency }}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.failure_reason }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div style="background-color: #fff3cd; padding: 15px; border-radius: 4px; margin: 20px 0;">
+        <h3 style="color: #856404; margin-top: 0;">{% trans "Important Information" %}</h3>
+        <p>
+            {% blocktrans trimmed %}
+                A refund for the amount you have already paid ({{ total_paid }} {{ event.currency }}) has been initiated.
+                The refund will be processed to your original payment method.
+            {% endblocktrans %}
+        </p>
+    </div>
+
+    <h3>{% trans "What Happens Next" %}</h3>
+    <ul style="margin: 10px 0 20px 20px;">
+        <li>{% trans "Your order has been cancelled and tickets will not be valid" %}</li>
+        <li>{% trans "You will receive a refund confirmation once the refund is processed" %}</li>
+        <li>{% trans "If you still wish to attend, you may place a new order" %}</li>
+    </ul>
+
+    <p>
+        <a href="{{ event.get_absolute_url }}" style="display: inline-block; padding: 10px 20px; background-color: #1976D2; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px;">
+            {% trans "Place New Order" %}
+        </a>
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            We apologize for any inconvenience this may have caused.
+            If you have any questions about this cancellation or the refund process, please contact our support team.
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            Best regards,<br>
+            {{ event.organizer.name }}
+        {% endblocktrans %}
+    </p>
+{% endblock %}

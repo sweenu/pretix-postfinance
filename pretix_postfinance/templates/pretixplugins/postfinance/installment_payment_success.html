@@ -1,0 +1,94 @@
+{% extends "pretixbase/email/base.html" %}
+
+{% load i18n %}
+{% load static %}
+
+{% block title %}
+    {% trans "Installment Payment Successful" %}
+{% endblock %}
+
+{% block content %}
+    <h2>{% trans "Installment Payment Successful" %}</h2>
+
+    <p>
+        {% blocktrans trimmed %}
+            Dear {{ order.email }},
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            Your installment payment has been successfully processed.
+        {% endblocktrans %}
+    </p>
+
+    <table style="width: 100%; margin: 20px 0;">
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Event" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ event.name }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Order" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ order.code }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Installment" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.installment_number }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Amount" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.amount }} {{ event.currency }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Date" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.paid_at }}</td>
+        </tr>
+    </table>
+
+    {% if remaining_installments %}
+        <h3>{% trans "Remaining Installments" %}</h3>
+        <table style="width: 100%; margin: 20px 0;">
+            <thead>
+                <tr>
+                    <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: left;">{% trans "Number" %}</th>
+                    <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: left;">{% trans "Amount" %}</th>
+                    <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: left;">{% trans "Due Date" %}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for remaining in remaining_installments %}
+                <tr>
+                    <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ remaining.installment_number }}</td>
+                    <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ remaining.amount }} {{ event.currency }}</td>
+                    <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ remaining.due_date }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+
+    <p>
+        {% blocktrans trimmed %}
+            Thank you for your payment. Your next installment will be automatically charged on the due date.
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            If you need to update your payment method, please visit your order page.
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        <a href="{{ order.get_absolute_url }}" style="display: inline-block; padding: 10px 20px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px;">
+            {% trans "View Order" %}
+        </a>
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            Best regards,<br>
+            {{ event.organizer.name }}
+        {% endblocktrans %}
+    </p>
+{% endblock %}

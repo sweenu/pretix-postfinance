@@ -1,0 +1,87 @@
+{% extends "pretixbase/email/base.html" %}
+
+{% load i18n %}
+{% load static %}
+
+{% block title %}
+    {% trans "Installment Payment Failed - Organizer Notification" %}
+{% endblock %}
+
+{% block content %}
+    <h2 style="color: #d32f2f;">{% trans "Installment Payment Failed" %}</h2>
+
+    <p>
+        {% blocktrans trimmed %}
+            Dear Organizer,
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            An installment payment has failed for the following order:
+        {% endblocktrans %}
+    </p>
+
+    <table style="width: 100%; margin: 20px 0;">
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Order Code" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ order.code }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Customer Email" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ order.email }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Event" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ event.name }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Installment Number" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.installment_number }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Amount" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.amount }} {{ event.currency }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Failure Reason" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.failure_reason }}</td>
+        </tr>
+    </table>
+
+    <div style="background-color: #e8f5e9; padding: 15px; border-radius: 4px; margin: 20px 0;">
+        <h3 style="color: #2e7d32; margin-top: 0;">{% trans "Automatic Retry Information" %}</h3>
+        <p>
+            {% blocktrans trimmed %}
+                The system will automatically retry this payment until the grace period ends on {{ installment.grace_period_ends }}.
+                The customer has been notified and provided with instructions to update their payment method.
+            {% endblocktrans %}
+        </p>
+    </div>
+
+    <h3>{% trans "Recommended Actions" %}</h3>
+    <ul style="margin: 10px 0 20px 20px;">
+        <li>{% trans "Monitor the order status in the admin interface" %}</li>
+        <li>{% trans "Check if this is part of a pattern that might indicate issues with your payment provider" %}</li>
+        <li>{% trans "Consider reaching out to the customer if the payment continues to fail" %}</li>
+    </ul>
+
+    <p>
+        <a href="{{ order.get_admin_url }}" style="display: inline-block; padding: 10px 20px; background-color: #1976D2; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px;">
+            {% trans "View Order in Admin" %}
+        </a>
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            This is an automated notification. No immediate action is required unless the payment continues to fail.
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            Best regards,<br>
+            Pretix Installment System
+        {% endblocktrans %}
+    </p>
+{% endblock %}

@@ -1,0 +1,83 @@
+{% extends "pretixbase/email/base.html" %}
+
+{% load i18n %}
+{% load static %}
+
+{% block title %}
+    {% trans "Installment Payment Reminder" %}
+{% endblock %}
+
+{% block content %}
+    <h2>{% trans "Installment Payment Reminder" %}</h2>
+
+    <p>
+        {% blocktrans trimmed %}
+            Dear {{ order.email }},
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            This is a friendly reminder that your next installment payment is coming up.
+        {% endblocktrans %}
+    </p>
+
+    <table style="width: 100%; margin: 20px 0;">
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Event" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ event.name }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Order" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ order.code }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Installment" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.installment_number }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Amount" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.amount }} {{ event.currency }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Due Date" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.due_date }}</td>
+        </tr>
+    </table>
+
+    <div style="background-color: #e8f5e9; padding: 15px; border-radius: 4px; margin: 20px 0;">
+        <h3 style="color: #2e7d32; margin-top: 0;">{% trans "No Action Required" %}</h3>
+        <p>
+            {% blocktrans trimmed %}
+                Your payment method on file will be automatically charged on the due date.
+                You don't need to do anything unless you want to update your payment information.
+            {% endblocktrans %}
+        </p>
+    </div>
+
+    <h3>{% trans "Payment Information" %}</h3>
+    <p>
+        {% blocktrans trimmed %}
+            Payment Method: Card ending in **** (saved during checkout)
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        <a href="{{ order.get_absolute_url }}" style="display: inline-block; padding: 10px 20px; background-color: #1976D2; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px;">
+            {% trans "Update Payment Method" %}
+        </a>
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            If you have any questions about your installment plan, please don't hesitate to contact us.
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            Thank you for your business!<br>
+            {{ event.organizer.name }}
+        {% endblocktrans %}
+    </p>
+{% endblock %}

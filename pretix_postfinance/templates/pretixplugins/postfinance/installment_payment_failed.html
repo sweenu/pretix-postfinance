@@ -1,0 +1,87 @@
+{% extends "pretixbase/email/base.html" %}
+
+{% load i18n %}
+{% load static %}
+
+{% block title %}
+    {% trans "Installment Payment Failed" %}
+{% endblock %}
+
+{% block content %}
+    <h2 style="color: #d32f2f;">{% trans "Installment Payment Failed" %}</h2>
+
+    <p>
+        {% blocktrans trimmed %}
+            Dear {{ order.email }},
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            We regret to inform you that your installment payment has failed.
+        {% endblocktrans %}
+    </p>
+
+    <table style="width: 100%; margin: 20px 0;">
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Event" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ event.name }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Order" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ order.code }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Installment" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.installment_number }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Amount" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.amount }} {{ event.currency }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Failure Reason" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.failure_reason }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;"><strong>{% trans "Grace Period Ends" %}:</strong></td>
+            <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ installment.grace_period_ends }}</td>
+        </tr>
+    </table>
+
+    <div style="background-color: #fff3cd; padding: 15px; border-radius: 4px; margin: 20px 0;">
+        <h3 style="color: #856404; margin-top: 0;">{% trans "Important Information" %}</h3>
+        <p>
+            {% blocktrans trimmed %}
+                We will automatically retry this payment until {{ installment.grace_period_ends }}.
+                If the payment continues to fail, your order may be cancelled.
+            {% endblocktrans %}
+        </p>
+    </div>
+
+    <h3>{% trans "What You Can Do" %}</h3>
+    <ul style="margin: 10px 0 20px 20px;">
+        <li>{% trans "Ensure your payment method is valid and has sufficient funds" %}</li>
+        <li>{% trans "Update your payment information if your card has expired or been replaced" %}</li>
+        <li>{% trans "Contact your bank if you believe this payment was incorrectly declined" %}</li>
+    </ul>
+
+    <p>
+        <a href="{{ order.get_absolute_url }}" style="display: inline-block; padding: 10px 20px; background-color: #1976D2; color: white; text-decoration: none; border-radius: 4px; margin-top: 10px;">
+            {% trans "Update Payment Method" %}
+        </a>
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            If you have any questions, please contact our support team.
+        {% endblocktrans %}
+    </p>
+
+    <p>
+        {% blocktrans trimmed %}
+            Best regards,<br>
+            {{ event.organizer.name }}
+        {% endblocktrans %}
+    </p>
+{% endblock %}
