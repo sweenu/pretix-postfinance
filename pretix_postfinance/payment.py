@@ -1008,6 +1008,31 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 },
             )
 
+        # Check for installment schedule and add to context
+        installment_schedule = []
+        has_installments = False
+        try:
+            from .models import InstallmentSchedule
+            installments = InstallmentSchedule.objects.filter(
+                order=payment.order
+            ).order_by("installment_number")
+            if installments.exists():
+                has_installments = True
+                for installment in installments:
+                    installment_schedule.append({
+                        "installment_number": installment.installment_number,
+                        "amount": installment.amount,
+                        "due_date": installment.due_date,
+                        "status": installment.status,
+                        "paid_at": installment.paid_at,
+                        "token_id": installment.token_id,
+                        "failure_reason": installment.failure_reason,
+                        "num_installments": installment.num_installments,
+                    })
+        except Exception:
+            # If there's any error accessing installment schedule, continue without it
+            pass
+
         template = get_template("pretixplugins/postfinance/control.html")
         ctx = {
             "request": request,
@@ -1018,6 +1043,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             "error_suggestion": error_suggestion,
             "can_capture": can_capture,
             "capture_url": capture_url,
+            "has_installments": has_installments,
+            "installment_schedule": installment_schedule,
         }
         return template.render(ctx)
 

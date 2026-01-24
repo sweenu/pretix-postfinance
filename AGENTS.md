@@ -97,6 +97,7 @@ The installment payment feature allows customers to pay for orders in multiple m
 - **Session Data**: Installment count stored in session as `payment_postfinance_num_installments`
 - **Status Tracking**: InstallmentSchedule uses status field (scheduled/paid/failed/cancelled)
 - **Email Notifications**: Automatic emails sent for success, failure, reminders, and cancellations
+- **Admin Views**: Use color-coded status indicators (green=paid, orange=scheduled, red=failed, gray=cancelled) for quick visual recognition
 
 ### Development Notes
 

@@ -49,3 +49,68 @@
         </form>
     {% endif %}
 {% endif %}
+
+{% if has_installments %}
+    <div style="margin-top: 20px;">
+        <h4>{% trans "Installment Schedule" %}</h4>
+        <table class="table table-condensed">
+            <thead>
+                <tr>
+                    <th>{% trans "Installment" %}</th>
+                    <th>{% trans "Amount" %}</th>
+                    <th>{% trans "Due Date" %}</th>
+                    <th>{% trans "Status" %}</th>
+                    <th>{% trans "Paid At" %}</th>
+                    <th>{% trans "Token ID" %}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for installment in installment_schedule %}
+                    <tr>
+                        <td>{{ installment.installment_number }}</td>
+                        <td>{{ installment.amount }}</td>
+                        <td>{{ installment.due_date }}</td>
+                        <td>
+                            {% if installment.status == "paid" %}
+                                <span style="color: green;">
+                                    <strong>{% trans "Paid" %}</strong>
+                                </span>
+                            {% elif installment.status == "scheduled" %}
+                                <span style="color: #f89406;">
+                                    <strong>{% trans "Scheduled" %}</strong>
+                                </span>
+                            {% elif installment.status == "failed" %}
+                                <span style="color: red;">
+                                    <strong>{% trans "Failed" %}</strong>
+                                </span>
+                                {% if installment.failure_reason %}
+                                    <br><small>{{ installment.failure_reason }}</small>
+                                {% endif %}
+                            {% elif installment.status == "cancelled" %}
+                                <span style="color: #666;">
+                                    <strong>{% trans "Cancelled" %}</strong>
+                                </span>
+                            {% else %}
+                                <span>{{ installment.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if installment.paid_at %}
+                                {{ installment.paid_at }}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if installment.token_id %}
+                                {{ installment.token_id|slice:":6" }}...
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endif %}
