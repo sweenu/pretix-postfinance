@@ -722,3 +722,197 @@ def test_webhook_no_client_configured_returns_500(env, client, monkeypatch, vali
 
     # Should return 500 for configuration error
     assert response.status_code == 500
+
+
+@pytest.mark.django_db
+def test_webhook_installment_payment_success(env, client, monkeypatch, valid_signature):
+    """Test webhook processing successful installment payment."""
+    from postfinancecheckout.models import TransactionState
+
+    from pretix_postfinance.models import InstallmentSchedule
+
+    event, order = env
+
+    # Create an installment schedule
+    with scopes_disabled():
+        installment = InstallmentSchedule.objects.create(
+            order=order,
+            installment_number=2,
+            amount=Decimal("50.00"),
+            due_date=now().date(),
+            status=InstallmentSchedule.Status.SCHEDULED,
+            num_installments=3,
+            token_id="test-token-123",
+        )
+
+    # Mock successful transaction
+    mock_transaction = MagicMock()
+    mock_transaction.state = TransactionState.COMPLETED
+    mock_transaction.id = 123456
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: mock_transaction,
+    )
+
+    # Create merchant reference for installment
+    merchant_reference = f"pretix-installment-{order.code}-{installment.installment_number}"
+
+    response = client.post(
+        "/_postfinance/webhook/",
+        json.dumps(get_webhook_payload(int(merchant_reference))),
+        content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
+    )
+
+    assert response.status_code == 200
+
+    # Check installment was marked as paid
+    with scopes_disabled():
+        installment.refresh_from_db()
+        assert installment.status == InstallmentSchedule.Status.PAID
+        assert installment.paid_at is not None
+        assert installment.failure_reason is None
+        assert installment.grace_period_ends is None
+
+        # Check OrderPayment was created
+        order_payment = order.payments.filter(
+            provider="postfinance",
+            state=OrderPayment.PAYMENT_STATE_CONFIRMED
+        ).last()
+        assert order_payment is not None
+        assert order_payment.amount == installment.amount
+        assert order_payment.info_data.get("installment_number") == installment.installment_number
+        assert order_payment.info_data.get("installment_id") == installment.pk
+
+
+@pytest.mark.django_db
+def test_webhook_installment_payment_failed(env, client, monkeypatch, valid_signature):
+    """Test webhook processing failed installment payment."""
+    from postfinancecheckout.models import TransactionState
+
+    from pretix_postfinance.models import InstallmentSchedule
+
+    event, order = env
+
+    # Create an installment schedule
+    with scopes_disabled():
+        installment = InstallmentSchedule.objects.create(
+            order=order,
+            installment_number=2,
+            amount=Decimal("50.00"),
+            due_date=now().date(),
+            status=InstallmentSchedule.Status.SCHEDULED,
+            num_installments=3,
+            token_id="test-token-123",
+        )
+
+    # Mock failed transaction
+    mock_transaction = MagicMock()
+    mock_transaction.state = TransactionState.FAILED
+    mock_transaction.id = 123456
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: mock_transaction,
+    )
+
+    # Create merchant reference for installment
+    merchant_reference = f"pretix-installment-{order.code}-{installment.installment_number}"
+
+    response = client.post(
+        "/_postfinance/webhook/",
+        json.dumps(get_webhook_payload(int(merchant_reference))),
+        content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
+    )
+
+    assert response.status_code == 200
+
+    # Check installment was marked as failed
+    with scopes_disabled():
+        installment.refresh_from_db()
+        assert installment.status == InstallmentSchedule.Status.FAILED
+        assert installment.failure_reason == "PostFinance transaction state: FAILED"
+        assert installment.grace_period_ends is not None
+        # Grace period should be 3 days from now
+        expected_grace_period = now() + timedelta(days=3)
+        assert abs((installment.grace_period_ends - expected_grace_period).total_seconds()) < 10
+
+
+@pytest.mark.django_db
+def test_webhook_installment_not_found(env, client, monkeypatch, valid_signature):
+    """Test webhook with installment transaction that doesn't match any installment."""
+    event, order = env
+
+    # Mock transaction
+    mock_transaction = MagicMock()
+    mock_transaction.state = TransactionState.COMPLETED
+    mock_transaction.id = 123456
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: mock_transaction,
+    )
+
+    # Use a merchant reference that doesn't match any installment
+    fake_merchant_reference = "pretix-installment-NONEXISTENT-1"
+
+    response = client.post(
+        "/_postfinance/webhook/",
+        json.dumps(get_webhook_payload(int(fake_merchant_reference))),
+        content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
+    )
+
+    # Should return 200 (not found is legitimate)
+    assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_webhook_installment_alternative_format(env, client, monkeypatch, valid_signature):
+    """Test webhook with alternative merchant reference format from background tasks."""
+    from postfinancecheckout.models import TransactionState
+
+    from pretix_postfinance.models import InstallmentSchedule
+
+    event, order = env
+
+    # Create an installment schedule
+    with scopes_disabled():
+        installment = InstallmentSchedule.objects.create(
+            order=order,
+            installment_number=2,
+            amount=Decimal("50.00"),
+            due_date=now().date(),
+            status=InstallmentSchedule.Status.SCHEDULED,
+            num_installments=3,
+            token_id="test-token-123",
+        )
+
+    # Mock successful transaction
+    mock_transaction = MagicMock()
+    mock_transaction.state = TransactionState.COMPLETED
+    mock_transaction.id = 123456
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: mock_transaction,
+    )
+
+    # Create alternative merchant reference format: pretix-{event.slug}-installment-{number}
+    alternative_reference = f"pretix-{event.slug}-installment-{installment.installment_number}"
+
+    response = client.post(
+        "/_postfinance/webhook/",
+        json.dumps(get_webhook_payload(int(alternative_reference))),
+        content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
+    )
+
+    assert response.status_code == 200
+
+    # Check installment was marked as paid
+    with scopes_disabled():
+        installment.refresh_from_db()
+        assert installment.status == InstallmentSchedule.Status.PAID

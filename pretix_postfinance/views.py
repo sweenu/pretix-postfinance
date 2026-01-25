@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from datetime import timedelta
 from typing import Any
 
 from django.contrib import messages
@@ -28,6 +29,7 @@ from ._types import PretixHttpRequest
 from .api import PostFinanceClient, PostFinanceError
 from .models import InstallmentSchedule
 from .payment import FAILURE_STATES, SUCCESS_STATES
+from .tasks import _send_organizer_failure_notification
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +123,12 @@ def webhook(request: HttpRequest) -> HttpResponse:
         status, _ = _process_transaction_webhook(entity_id, space_id)
 
         if status == WEBHOOK_STATUS_NOT_FOUND:
-            # Try refund processing if transaction not found
-            status, _ = _process_refund_webhook(entity_id, space_id)
+            # Try installment processing if transaction not found
+            status, _ = _process_installment_webhook(entity_id, space_id)
+
+            if status == WEBHOOK_STATUS_NOT_FOUND:
+                # Try refund processing if installment not found
+                status, _ = _process_refund_webhook(entity_id, space_id)
 
         if status == WEBHOOK_STATUS_NO_CLIENT:
             return JsonResponse(
@@ -390,6 +396,304 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
         return (WEBHOOK_STATUS_OK, True)
 
     return (WEBHOOK_STATUS_OK, False)
+
+
+def _process_installment_webhook(entity_id: int, space_id: int) -> tuple[str, bool | None]:
+    """
+    Process an installment-related transaction from webhook.
+
+    This function handles webhook notifications for installment payments that were
+    initiated by the background tasks (process_due_installments, retry_failed_installments).
+
+    Returns:
+        tuple[str, bool | None]: A tuple of (status, processed) where:
+            - status: WEBHOOK_STATUS_NOT_FOUND (entity not in our DB),
+                      WEBHOOK_STATUS_NO_CLIENT (configuration error),
+                      WEBHOOK_STATUS_API_ERROR (PostFinance API failed),
+                      WEBHOOK_STATUS_OK (processed successfully)
+            - processed: True if state changed, False if no change, None if not applicable
+    """
+    # Try to find the installment by parsing the merchant reference
+    # Merchant reference format: pretix-installment-{order.code}-{installment_number}
+    installment = None
+    order_code = None
+    installment_number = None
+
+    # Parse merchant reference to extract order code and installment number
+    merchant_reference_pattern = "pretix-installment-"
+    if str(entity_id).startswith(merchant_reference_pattern):
+        # Extract the parts after "pretix-installment-"
+        parts = str(entity_id).split("-")
+        if len(parts) >= 3:
+            order_code = parts[-2]  # Second to last part
+            try:
+                installment_number = int(parts[-1])  # Last part
+            except ValueError:
+                installment_number = None
+
+    if not order_code or not installment_number:
+        # Try alternative format: pretix-{event.slug}-installment-{installment_number}
+        # This is used by the background tasks
+        parts = str(entity_id).split("-")
+        if len(parts) >= 4 and parts[-2] == "installment":
+            try:
+                installment_number = int(parts[-1])
+                # We need to find the order by searching for installments with this number
+                installments = InstallmentSchedule.objects.filter(
+                    installment_number=installment_number
+                )
+                if installments.exists():
+                    installment = installments.first()
+            except ValueError:
+                pass
+    else:
+        # Try to find the order by code
+        from pretix.base.models import Order
+        try:
+            order = Order.objects.get(code=order_code)
+            installment = InstallmentSchedule.objects.filter(
+                order=order,
+                installment_number=installment_number
+            ).first()
+        except Order.DoesNotExist:
+            pass
+
+    if not installment:
+        # Entity not found in our database - this webhook isn't for us
+        return (WEBHOOK_STATUS_NOT_FOUND, None)
+
+    client = _get_client_for_space(space_id)
+    if not client:
+        # Configuration error - no client configured for this space
+        logger.error(
+            "PostFinance webhook: no client configured for spaceId=%s, installment transaction=%s",
+            space_id,
+            entity_id,
+        )
+        return (WEBHOOK_STATUS_NO_CLIENT, None)
+
+    try:
+        transaction = client.get_transaction(int(entity_id))
+    except PostFinanceError as e:
+        # External API error - PostFinance API call failed
+        logger.error(
+            "PostFinance webhook: failed to fetch installment transaction %s: %s "
+            "(status=%s, code=%s)",
+            entity_id,
+            e.message,
+            e.status_code,
+            e.error_code,
+        )
+        return (WEBHOOK_STATUS_API_ERROR, None)
+
+    transaction_state = transaction.state
+    if not transaction_state:
+        logger.warning(
+            "PostFinance webhook: installment transaction %s has no state",
+            entity_id,
+        )
+        return (WEBHOOK_STATUS_OK, False)
+
+    logger.info(
+        "PostFinance webhook: processing installment transaction %s for installment %s, state=%s",
+        entity_id,
+        installment.pk,
+        transaction_state.value,
+    )
+
+    # Update installment status based on transaction state
+    processed = False
+    if transaction_state.value in SUCCESS_STATES:
+        # Payment successful
+        if installment.status != InstallmentSchedule.Status.PAID:
+            installment.status = InstallmentSchedule.Status.PAID
+            installment.paid_at = now()
+            installment.failure_reason = None
+            installment.grace_period_ends = None
+            installment.save()
+
+            # Create OrderPayment record for this installment
+            from pretix.base.models import OrderPayment
+            order_payment = OrderPayment(
+                order=installment.order,
+                amount=installment.amount,
+                payment_date=now(),
+                provider="postfinance",
+                state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+                info_data={
+                    "transaction_id": transaction.id,
+                    "state": transaction_state.value,
+                    "installment_number": installment.installment_number,
+                    "installment_id": installment.pk,
+                    "type": "installment",
+                },
+            )
+            order_payment.save()
+
+            # Link the payment to the installment
+            installment.payment = order_payment
+            installment.save()
+
+            # Log the successful payment
+            installment.order.log_action(
+                "pretix_postfinance.installment.paid",
+                data={
+                    "installment_number": installment.installment_number,
+                    "amount": str(installment.amount),
+                    "transaction_id": transaction.id,
+                    "payment_id": order_payment.pk,
+                },
+            )
+
+            logger.info(
+                "PostFinance webhook: installment %s for order %s marked as paid",
+                installment.installment_number,
+                installment.order.code,
+            )
+
+            # Send success email to customer
+            _send_installment_webhook_success_email(installment)
+
+            processed = True
+
+    elif transaction_state.value in FAILURE_STATES:
+        # Payment failed
+        if installment.status != InstallmentSchedule.Status.FAILED:
+            installment.status = InstallmentSchedule.Status.FAILED
+            installment.failure_reason = f"PostFinance transaction state: {transaction_state.value}"
+            installment.grace_period_ends = now() + timedelta(days=3)
+            installment.save()
+
+            # Log the failed payment
+            installment.order.log_action(
+                "pretix_postfinance.installment.failed",
+                data={
+                    "installment_number": installment.installment_number,
+                    "amount": str(installment.amount),
+                    "transaction_id": transaction.id,
+                    "failure_reason": installment.failure_reason,
+                },
+            )
+
+            logger.warning(
+                "PostFinance webhook: installment %s for order %s marked as failed",
+                installment.installment_number,
+                installment.order.code,
+            )
+
+            # Send failure email to customer
+            _send_installment_webhook_failed_email(installment)
+
+            # Send failure notification to organizer
+            _send_organizer_failure_notification(installment)
+
+            processed = True
+
+    else:
+        # Intermediate/pending state - don't change installment status
+        logger.info(
+            "PostFinance webhook: installment transaction %s in intermediate state %s, "
+            "no action taken",
+            entity_id,
+            transaction_state.value,
+        )
+
+    return (WEBHOOK_STATUS_OK, processed)
+
+
+def _send_installment_webhook_success_email(installment: InstallmentSchedule) -> None:
+    """Send email to customer when installment payment succeeds via webhook."""
+    try:
+        from django.template.loader import render_to_string
+
+        order = installment.order
+        event = order.event
+
+        # Get remaining installments for the template
+        remaining_installments = InstallmentSchedule.objects.filter(
+            order=order,
+            status__in=[InstallmentSchedule.Status.SCHEDULED, InstallmentSchedule.Status.PENDING]
+        ).order_by('installment_number')
+
+        # Render email template
+        subject = f"Installment Payment Successful - {event.name}"
+
+        context = {
+            'order': order,
+            'event': event,
+            'installment': installment,
+            'remaining_installments': remaining_installments,
+        }
+
+        html_message = render_to_string(
+            'pretixplugins/postfinance/installment_payment_success.html',
+            context
+        )
+
+        send_mail(
+            subject,
+            '',  # HTML email, no plain text version
+            f"noreply@{event.organizer.slug}.pretix.example.com",
+            [order.email],
+            html_message=html_message,
+            fail_silently=True,
+        )
+
+        logger.info(
+            "Sent installment success email via webhook for installment %s",
+            installment.installment_number,
+        )
+
+    except Exception as e:
+        logger.error(
+            "Failed to send installment success email via webhook for installment %s: %s",
+            installment.installment_number,
+            e,
+        )
+
+
+def _send_installment_webhook_failed_email(installment: InstallmentSchedule) -> None:
+    """Send email to customer when installment payment fails via webhook."""
+    try:
+        from django.template.loader import render_to_string
+
+        order = installment.order
+        event = order.event
+
+        subject = f"Installment Payment Failed - {event.name}"
+
+        # Render email template
+        context = {
+            'order': order,
+            'event': event,
+            'installment': installment,
+        }
+
+        html_message = render_to_string(
+            'pretixplugins/postfinance/installment_payment_failed.html',
+            context
+        )
+
+        send_mail(
+            subject,
+            '',  # HTML email, no plain text version
+            f"noreply@{event.organizer.slug}.pretix.example.com",
+            [order.email],
+            html_message=html_message,
+            fail_silently=True,
+        )
+
+        logger.info(
+            "Sent installment failure email via webhook for installment %s",
+            installment.installment_number,
+        )
+
+    except Exception as e:
+        logger.error(
+            "Failed to send installment failure email via webhook for installment %s: %s",
+            installment.installment_number,
+            e,
+        )
 
 
 class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):

@@ -116,7 +116,7 @@ def cancel_expired_grace_periods() -> None:
     logger.info("Found %s expired installments to process", expired_installments.count())
 
     # Group by order to process all installments for each order together
-    orders_to_cancel = {}
+    orders_to_cancel: dict[int, list[InstallmentSchedule]] = {}
     for installment in expired_installments:
         order_id = installment.order.id
         if order_id not in orders_to_cancel:

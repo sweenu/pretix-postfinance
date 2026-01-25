@@ -1,19 +1,19 @@
-from django.db import migrations, models
 import django.db.models.deletion
+from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
     """
     Initial migration for InstallmentSchedule model.
     """
-    
+
     initial = True
-    
+
     dependencies = [
         # This migration depends on pretix base models being available
         # We don't specify exact dependencies as pretix handles that
     ]
-    
+
     operations = [
         migrations.CreateModel(
             name="InstallmentSchedule",
