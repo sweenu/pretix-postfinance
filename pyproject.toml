@@ -118,6 +118,7 @@ ignore = [
 # Plugin code overrides base class methods, so unused args are expected
 "pretix_postfinance/*.py" = ["ARG002"]
 # Django signals require sender and kwargs arguments
+"pretix_postfinance/migrations/*.py" = ["RUF012"]
 "pretix_postfinance/signals.py" = ["ARG001"]
 # Test files: unused args in mocks/fixtures, unused vars from unpacking, long URLs
 "tests/*.py" = ["ARG001", "ARG005", "E402", "F841", "RUF059"]
