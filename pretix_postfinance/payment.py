@@ -18,8 +18,11 @@ from i18nfield.forms import I18nFormField, I18nTextarea, I18nTextInput
 from i18nfield.strings import LazyI18nString
 from postfinancecheckout.models import (
     AddressCreate,
+    ChargeState,
+    CustomersPresence,
     LineItemCreate,
     LineItemType,
+    TokenizationMode,
     TransactionState,
 )
 from pretix.base.forms import SecretKeySettingsField
@@ -31,6 +34,11 @@ from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .api import PostFinanceClient, PostFinanceError
+from .installments import (
+    installments_available,
+    plan_for_order,
+    scheduled_installment_for_payment,
+)
 
 if TYPE_CHECKING:
     from pretix.base.models import Event, Order
@@ -68,6 +76,10 @@ ERROR_STATUS_MESSAGES = {
 }
 
 PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
+
+# Key under which the ID of a reusable PostFinance token is recorded on
+# the first installment payment, for reference from the admin view.
+TOKEN_ID_KEY = "token_id"
 
 # info_data keys describing a payment charged in a different currency than
 # the event's. Written when a transaction is created, they snapshot the
@@ -110,6 +122,17 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     abort_pending_allowed = False
     execute_payment_needs_user = True
     payment_form_template_name = "pretixplugins/postfinance/checkout_payment_form.html"
+
+    @property
+    def installments_supported(self) -> bool:
+        """
+        Whether this provider can carry an installment plan.
+
+        Tokenised follow-up charges are implemented here, so the only
+        thing that can be missing is pretix's own installment support:
+        upstream pretix has no plans to attach a token to.
+        """
+        return installments_available()
 
     @property
     def test_mode_message(self) -> str:
@@ -925,11 +948,38 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         payment.info_data = info
         payment.save(update_fields=["info"])
 
+    def _get_order_merchant_reference(
+        self, order_code: str, installment_number: int | None = None
+    ) -> str:
+        merchant_reference = f"{self.event.slug}-{order_code}"
+        if installment_number is not None:
+            merchant_reference = f"{merchant_reference}-inst-{installment_number}"
+        return merchant_reference
+
+    def _payment_line_item_name(
+        self, payment: OrderPayment, installment: Any | None = None
+    ) -> str:
+        """
+        Describe on the payment page what the customer is paying for.
+
+        An installment says which one it is, so the PostFinance receipt of a
+        plan's first charge is not indistinguishable from a payment of the
+        whole order.
+        """
+        if installment is not None:
+            return str(_("Installment {number} of {count} for order {code}")).format(
+                number=installment.installment_number,
+                count=installment.plan.total_installments,
+                code=payment.order.code,
+            )
+        return str(_("Payment for order {code}")).format(code=payment.order.code)
+
     def _build_payment_transaction_line_items(
         self,
         payment: OrderPayment,
         detailed_line_items: bool = False,
         fx: dict[str, str] | None = None,
+        installment: Any | None = None,
     ) -> list[LineItemCreate]:
         if fx:
             # A single aggregate line item is used for converted charges,
@@ -939,7 +989,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # rounding drift.
             return [
                 LineItemCreate(
-                    name=str(_("Payment for order {code}")).format(code=payment.order.code),
+                    name=self._payment_line_item_name(payment, installment),
                     quantity=1,
                     amountIncludingTax=float(Decimal(fx["charged_amount"])),
                     type=LineItemType.PRODUCT,
@@ -961,7 +1011,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         return [
             LineItemCreate(
-                name=str(_("Payment for order {code}")).format(code=payment.order.code),
+                name=self._payment_line_item_name(payment, installment),
                 quantity=1,
                 amountIncludingTax=float(payment.amount),
                 type=LineItemType.PRODUCT,
@@ -1038,9 +1088,26 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             is part of the transaction's identity and must be stored with it.
         """
         client = self._get_client()
+        installment = scheduled_installment_for_payment(payment)
         line_items = self._build_payment_transaction_line_items(
-            payment, detailed_line_items=detailed_line_items, fx=fx
+            payment,
+            detailed_line_items=detailed_line_items,
+            fx=fx,
+            installment=installment,
         )
+        installment_number = None
+        tokenization_mode = None
+        if installment is not None:
+            # The customer is present for this one, so it goes through the
+            # normal payment page; forcing tokenization is what leaves behind
+            # a token the later installments can be charged against.
+            installment_number = installment.installment_number
+            tokenization_mode = TokenizationMode.FORCE_CREATION
+            logger.info(
+                "Enabling tokenization for installment %s of payment %s",
+                installment_number,
+                payment.pk,
+            )
 
         success_url = build_absolute_uri(
             self.event,
@@ -1066,8 +1133,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             line_items=line_items,
             success_url=success_url,
             failed_url=failed_url,
-            merchant_reference=f"{self.event.slug}-{payment.order.code}",
+            merchant_reference=self._get_order_merchant_reference(
+                payment.order.code,
+                installment_number=installment_number,
+            ),
             allowed_payment_method_configurations=self._parse_allowed_payment_methods(),
+            tokenization_mode=tokenization_mode,
             customer_email_address=payment.order.email,
             billing_address=self._build_transaction_billing_address(payment),
         )
@@ -1341,6 +1412,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             if state in SUCCESS_STATES:
                 # Check if already confirmed (webhook may have processed first)
                 payment.refresh_from_db()
+
+                # A plan's first payment leaves behind the token every
+                # later installment is charged against, so it has to be
+                # stored before the payment is confirmed.
+                self.store_installment_token(payment, transaction)
+
                 if payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
                     logger.info(
                         "Payment %s already confirmed, skipping (PostFinance state: %s)",
@@ -1415,6 +1492,310 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             self._clear_session_transaction_id(request)
 
         return None
+
+    def _installment_token_client(self, plan: Any) -> PostFinanceClient:
+        """
+        Create a client for the space an installment plan's token lives in.
+
+        A token can only be charged in the space that created it. The space
+        is recorded with the token, so a plan keeps working even if the
+        event's test mode is switched after the first payment.
+        """
+        token_data = plan.payment_token or {}
+        recorded_space_id = token_data.get(SPACE_ID_KEY)
+        if recorded_space_id:
+            test_space_id = self.settings.get("test_space_id")
+            if test_space_id and str(recorded_space_id) == str(test_space_id):
+                return self._get_client_for_mode("test")
+            space_id = self.settings.get("space_id")
+            if space_id and str(recorded_space_id) == str(space_id):
+                return self._get_client_for_mode("live")
+        return self._get_client()
+
+    def store_installment_token(self, payment: OrderPayment, transaction: Any) -> None:
+        """
+        Record the reusable token a plan's first payment produced.
+
+        Called from both paths that can settle that payment — the customer
+        returning from the payment page and the transaction webhook —
+        because whichever gets there first is the only one that sees the
+        transaction, and without a stored token every later installment of
+        the plan fails.
+
+        The currency the customer was actually charged in is snapshotted
+        alongside the token: later installments are charged without the
+        customer present, so there is no checkout to ask again, and they
+        must follow the currency and rate the plan was sold at.
+        """
+        installment = scheduled_installment_for_payment(payment)
+        if installment is None:
+            return
+
+        plan = plan_for_order(payment.order)
+        if plan is None:
+            logger.warning(
+                "Installment payment %s has no plan to store a token on",
+                payment.pk,
+            )
+            return
+
+        token = getattr(transaction, "token", None)
+        token_id = getattr(token, "id", None)
+        if not token_id:
+            logger.warning(
+                "Installment payment %s succeeded but no token was created; "
+                "installments after the first one cannot be charged",
+                payment.pk,
+            )
+            return
+
+        info_data = payment.info_data or {}
+        token_data: dict[str, Any] = {
+            "token_id": token_id,
+            "customer_id": getattr(token, "customer_id", None),
+            "customer_email": getattr(token, "customer_email_address", None),
+            SPACE_ID_KEY: info_data.get(SPACE_ID_KEY)
+            or self._space_id_for_payment(payment),
+        }
+        token_data.update(
+            {key: info_data[key] for key in FX_INFO_KEYS if info_data.get(key)}
+        )
+        # The first payment's charged amount describes that payment only;
+        # every installment converts its own amount at the stored rate.
+        token_data.pop("charged_amount", None)
+        plan.store_payment_token(token_data)
+
+        info_data[TOKEN_ID_KEY] = token_id
+        payment.info_data = info_data
+        payment.save(update_fields=["info"])
+
+        logger.info(
+            "Stored payment token %s for installment plan %s",
+            token_id,
+            plan.pk,
+        )
+
+    def installment_charge(self, plan: Any, installment: Any) -> tuple[str, Decimal]:
+        """
+        Return the currency and amount to charge for one installment.
+
+        pretix schedules installments in the event currency. When the
+        customer chose to pay in the alternative currency, the plan was sold
+        at the rate quoted then, so each installment converts its own share
+        at that snapshotted rate rather than at today's setting — otherwise
+        a rate change mid-plan would silently reprice the remaining
+        installments.
+
+        :raises PaymentException: If the plan was charged in a currency whose
+            rate is no longer known, so no amount can be derived.
+        """
+        amount = Decimal(str(installment.amount))
+        base_currency = str(plan.order.event.currency)
+
+        token_data = plan.payment_token or {}
+        charged_currency = token_data.get("charged_currency")
+        if not charged_currency or charged_currency == base_currency:
+            return base_currency, amount
+
+        raw_rate = token_data.get("fx_rate")
+        if raw_rate is None:
+            # Plans predating the snapshot fall back to the configured rate,
+            # but only while it still describes the same currency.
+            config = self.alt_currency_config
+            if config and config[0] == charged_currency:
+                raw_rate = config[1]
+        if raw_rate is None:
+            raise self._unknown_rate_exception(str(charged_currency))
+
+        rate = Decimal(str(raw_rate))
+        if rate <= 0:
+            raise self._unknown_rate_exception(str(charged_currency))
+
+        return str(charged_currency), self._convert(amount, rate)
+
+    @staticmethod
+    def _fail_installment(installment: Any, reason: str) -> bool:
+        """Record why an installment could not be charged."""
+        installment.failure_reason = reason
+        installment.save(update_fields=["failure_reason"])
+        return False
+
+    def execute_installment(self, plan: Any, installment: Any) -> bool:
+        """
+        Charge a scheduled installment against the plan's stored token.
+
+        Runs without the customer present, from pretix's periodic task, so
+        it never raises: a failure is reported by returning ``False`` with a
+        reason recorded on the installment, which pretix turns into a grace
+        period and a notification.
+
+        :param plan: The InstallmentPlan holding the token to charge
+        :param installment: The ScheduledInstallment to pay
+        :return: True if the charge succeeded
+        """
+        try:
+            token_data = plan.payment_token or {}
+            token_id = token_data.get("token_id")
+            if not token_id:
+                logger.error(
+                    "Cannot execute installment %s for order %s: no token_id in payment_token",
+                    installment.pk,
+                    plan.order.code,
+                )
+                return self._fail_installment(installment, "No payment token available")
+
+            currency, amount = self.installment_charge(plan, installment)
+
+            line_items = [
+                LineItemCreate(
+                    name=str(_("Installment {number} of {count} for order {code}")).format(
+                        number=installment.installment_number,
+                        count=plan.total_installments,
+                        code=plan.order.code,
+                    ),
+                    quantity=1,
+                    amountIncludingTax=float(amount),
+                    type=LineItemType.PRODUCT,
+                    uniqueId=f"installment-{plan.pk}-{installment.installment_number}",
+                )
+            ]
+
+            client = self._installment_token_client(plan)
+            transaction = client.create_transaction(
+                currency=currency,
+                line_items=line_items,
+                merchant_reference=self._get_order_merchant_reference(
+                    plan.order.code,
+                    installment_number=installment.installment_number,
+                ),
+                token=token_id,
+                customers_presence=CustomersPresence.NOT_PRESENT,
+                customer_id=token_data.get("customer_id"),
+                customer_email_address=token_data.get("customer_email"),
+            )
+
+            if not transaction.id:
+                logger.error(
+                    "PostFinance transaction missing ID for installment %s of order %s",
+                    installment.pk,
+                    plan.order.code,
+                )
+                return self._fail_installment(
+                    installment, "PostFinance transaction missing ID"
+                )
+
+            logger.info(
+                "Created installment transaction %s for installment %s of order %s "
+                "using token %s (%s %s)",
+                transaction.id,
+                installment.pk,
+                plan.order.code,
+                token_id,
+                amount,
+                currency,
+            )
+
+            charge = client.process_with_token(transaction.id)
+            charge_state = charge.state
+
+            if charge_state == ChargeState.SUCCESSFUL:
+                logger.info(
+                    "Installment %s for order %s succeeded (PostFinance charge state: %s)",
+                    installment.pk,
+                    plan.order.code,
+                    charge_state,
+                )
+                return True
+
+            if charge_state == ChargeState.FAILED:
+                failure_reason = None
+                if charge.failure_reason:
+                    failure_reason = charge.failure_reason.description
+                logger.warning(
+                    "Installment %s for order %s failed (PostFinance charge state: %s, "
+                    "reason: %s)",
+                    installment.pk,
+                    plan.order.code,
+                    charge_state,
+                    failure_reason,
+                )
+                return self._fail_installment(
+                    installment, str(failure_reason or "PostFinance charge failed")
+                )
+
+            logger.warning(
+                "Installment %s for order %s is pending or incomplete "
+                "(PostFinance charge state: %s)",
+                installment.pk,
+                plan.order.code,
+                charge_state,
+            )
+            return self._fail_installment(
+                installment,
+                f"PostFinance charge not successful: {charge_state.value}"
+                if charge_state
+                else "PostFinance charge not successful",
+            )
+
+        except PaymentException as e:
+            logger.error(
+                "Cannot charge installment %s for order %s: %s",
+                installment.pk,
+                plan.order.code,
+                e,
+            )
+            return self._fail_installment(installment, str(e))
+
+        except PostFinanceError as e:
+            logger.exception("PostFinance API error during installment execution: %s", e)
+            return self._fail_installment(installment, str(e))
+
+        except Exception as e:
+            logger.exception("Unexpected error during installment execution: %s", e)
+            return self._fail_installment(installment, str(e))
+
+    def revoke_payment_token(self, plan: Any) -> None:
+        """
+        Delete the plan's token at PostFinance.
+
+        Called when a plan is completed or cancelled, so a stored payment
+        method cannot be charged again afterwards. Failing to reach
+        PostFinance is logged rather than raised: pretix clears the token on
+        its side either way, and a plan must not stay open because a cleanup
+        call failed.
+
+        :param plan: The InstallmentPlan holding the token to revoke
+        """
+        try:
+            token_data = plan.payment_token or {}
+            token_id = token_data.get("token_id")
+            if not token_id:
+                logger.info("No token to revoke for installment plan %s", plan.pk)
+                return
+
+            client = self._installment_token_client(plan)
+            client.delete_token(token_id)
+
+            logger.info(
+                "Revoked payment token %s for installment plan %s",
+                token_id,
+                plan.pk,
+            )
+
+        except PostFinanceError as e:
+            logger.warning(
+                "Failed to revoke token for installment plan %s: %s",
+                plan.pk,
+                e,
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Unexpected error revoking token for installment plan %s: %s",
+                plan.pk,
+                e,
+            )
+
 
     def payment_pending_render(self, request: HttpRequest, payment: OrderPayment) -> str:
         """

@@ -36,6 +36,7 @@ def mock_services():
         "SpacesService": MagicMock(),
         "TransactionsService": MagicMock(),
         "RefundsService": MagicMock(),
+        "TokensService": MagicMock(),
         "WebhookEncryptionKeysService": MagicMock(),
         "PaymentMethodConfigurationsService": MagicMock(),
         "WebhookURLsService": MagicMock(),
@@ -46,6 +47,7 @@ def mock_services():
         patch.object(api_module, "SpacesService", mocks["SpacesService"]),
         patch.object(api_module, "TransactionsService", mocks["TransactionsService"]),
         patch.object(api_module, "RefundsService", mocks["RefundsService"]),
+        patch.object(api_module, "TokensService", mocks["TokensService"]),
         patch.object(
             api_module, "WebhookEncryptionKeysService", mocks["WebhookEncryptionKeysService"]
         ),
