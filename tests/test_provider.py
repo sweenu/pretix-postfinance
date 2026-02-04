@@ -5,7 +5,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from postfinancecheckout.models import TransactionState
+from postfinancecheckout.models import TokenizationMode, TransactionState
 from pretix.base.models import InvoiceAddress, Order, OrderPayment, OrderRefund
 from pretix.base.payment import PaymentException
 
@@ -608,6 +608,54 @@ def test_payment_prepare_cleans_stale_payment_transaction_on_failure(
     payment.refresh_from_db()
     assert payment.info_data.get("pending_transaction_id") is None
     assert payment.info_data.get("other") == "keep"
+
+
+@pytest.mark.django_db
+def test_payment_prepare_uses_installment_reference_and_tokenization(
+    env, rf, monkeypatch, transaction_factory
+):
+    """
+    The first payment of an installment plan asks PostFinance for a reusable
+    token, which is what the later installments are charged against.
+    """
+    event, order = env
+
+    captured_kwargs = {}
+
+    def capture_create_transaction(self, **kwargs):
+        captured_kwargs.update(kwargs)
+        return transaction_factory(id=999888)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        capture_create_transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.scheduled_installment_for_payment",
+        lambda payment: SimpleNamespace(
+            installment_number=1,
+            plan=SimpleNamespace(pk=42, total_installments=3),
+        ),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.post("/", {"payment": "postfinance"})
+    req.session = {}
+
+    payment = order.payments.create(provider="postfinance", amount=Decimal("100.00"))
+
+    result = prov.payment_prepare(req, payment)
+
+    assert result == "https://checkout.postfinance.ch/pay/999888"
+    assert captured_kwargs["merchant_reference"] == f"{event.slug}-{order.code}-inst-1"
+    assert captured_kwargs["tokenization_mode"] == TokenizationMode.FORCE_CREATION
+    assert captured_kwargs["line_items"][0].name == (
+        f"Installment 1 of 3 for order {order.code}"
+    )
 
 
 @pytest.mark.django_db

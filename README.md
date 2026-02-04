@@ -81,6 +81,9 @@ Configure the plugin in your pretix settings with:
 - Optional alternative payment currency: customers can choose to be charged
   in a different currency (e.g. CHF on a EUR event) at a configured exchange
   rate (see below)
+- Installment plans, where pretix supports them: the first installment is paid
+  on the payment page and the rest are charged automatically against a stored
+  payment method (see below)
 
 ### Testing the production space
 
@@ -127,6 +130,37 @@ full remaining amount returns what is left of the stored charge instead, so
 conversion rounding never leaves a cent behind or overshoots the transaction.
 The charged amount and rate are shown to the customer during checkout and to
 organizers in the order's payment details.
+
+### Installment plans
+
+On a pretix installation that supports installments, customers can split an
+order into monthly installments and pay the first one during checkout. This
+plugin implements the provider side of that:
+
+- The first installment goes through the normal payment page, asking
+  PostFinance to tokenize the payment method the customer used.
+- The token is stored on the plan and every later installment is charged
+  against it without the customer present, on the schedule pretix keeps.
+- The token is deleted at PostFinance once the plan completes or is
+  cancelled, so a stored payment method cannot be charged afterwards.
+
+Installments are only offered when the pretix installation provides them
+(upstream pretix does not) and the event has them switched on. Enabling them,
+the number of installments, the minimum order value and the grace period for a
+failed charge are all pretix event settings, not plugin settings.
+
+Because the token is what makes the later charges possible, the plugin stores
+it from whichever path settles the first payment — the customer returning from
+the payment page, or the transaction webhook. Set up webhooks: a customer who
+closes the tab after paying otherwise leaves the plan without a token, and the
+remaining installments cannot be charged.
+
+Installments combine with the alternative payment currency. A plan bought in
+the alternative currency is charged in that currency for its whole life: each
+installment converts its own share at the rate that was quoted when the order
+was placed, which is stored with the token. Changing the configured rate
+afterwards does not reprice open plans. pretix keeps recording the payments in
+the event currency, as it does for one-off payments.
 
 ## License
 

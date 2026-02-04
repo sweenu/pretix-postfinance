@@ -485,6 +485,14 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
 
     if transaction_state in SUCCESS_STATES:
         try:
+            # If the customer never returns from the payment page, this is
+            # the only place the transaction's token is ever seen, and an
+            # installment plan without a stored token cannot be charged
+            # again. Store it before confirming, which settles installment
+            # one and hands the plan over to the scheduled charges.
+            provider = payment.payment_provider
+            if provider is not None:
+                provider.store_installment_token(payment, transaction)
             payment.confirm()
             logger.info("PostFinance webhook: payment %s confirmed", payment.pk)
             return (WEBHOOK_STATUS_OK, True)
