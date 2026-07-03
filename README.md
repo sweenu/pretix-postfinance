@@ -75,6 +75,10 @@ Configure the plugin in your pretix settings with:
 - Payment processing via PostFinance Checkout
 - Full and partial refund support
 - Webhook handling for payment and refund notifications
+- Test mode support: with test credentials configured, events in test mode
+  offer both the test space and the production space as payment options, so
+  the production space can be verified end-to-end before going live
+  (production space payments are real charges)
 
 ## License
 

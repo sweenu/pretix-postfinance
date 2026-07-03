@@ -23,13 +23,14 @@ from postfinancecheckout.models import (
 from pretix.base.forms import SecretKeySettingsField
 from pretix.base.models import OrderPayment, OrderRefund
 from pretix.base.payment import BasePaymentProvider, PaymentException
+from pretix.base.settings import SettingsSandbox
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .api import PostFinanceClient, PostFinanceError
 
 if TYPE_CHECKING:
-    from pretix.base.models import Order
+    from pretix.base.models import Event, Order
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,10 @@ ERROR_STATUS_MESSAGES = {
 PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
 SESSION_TRANSACTION_ID_KEY = "payment_postfinance_transaction_id"
 SESSION_TRANSACTION_PAYMENT_ID_KEY = "payment_postfinance_transaction_payment_id"
+
+# All provider identifiers used by this plugin. Payments and refunds may be
+# stored under any of these.
+PROVIDER_IDENTIFIERS = ("postfinance", "postfinance_prod")
 
 
 class PostFinancePaymentProvider(BasePaymentProvider):
@@ -140,15 +145,42 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return self._get_credentials_for_mode("test")
         return self._get_credentials_for_mode("live")
 
+    def _space_id_for_payment(self, payment: OrderPayment) -> str | None:
+        """
+        Return the ID of the space the payment's transaction lives in.
+
+        Payments made while the order was in test mode were created in the
+        test space (if test credentials are configured).
+        """
+        if payment.order.testmode and self._has_test_credentials():
+            return self.settings.get("test_space_id")
+        return self.settings.get("space_id")
+
+    @property
+    def _base_public_name(self) -> str:
+        """
+        Return the configured display name without any space suffix.
+
+        If a custom display name is configured in event settings, use that.
+        Otherwise fall back to the default name 'PostFinance'.
+        """
+        name = self.settings.get("public_name", as_type=LazyI18nString)
+        if name:
+            return str(name)
+        return PostFinancePaymentProvider.verbose_name
+
     @property
     def public_name(self) -> str:
         """
         Return the name shown to customers during checkout.
 
-        If a custom display name is configured in event settings, use that.
-        Otherwise fall back to the default verbose name.
+        While the event is in test mode and test credentials are configured,
+        the name is suffixed with "(test space)" to distinguish it from the
+        production space provider that is also offered in test mode.
         """
-        return str(self.settings.get("public_name", as_type=LazyI18nString)) or self.verbose_name
+        if self.event.testmode and self._has_test_credentials():
+            return f"{self._base_public_name} ({_('test space')})"
+        return self._base_public_name
 
     def _get_payment_method_choices(self) -> list[tuple[str, str]]:
         """
@@ -1107,7 +1139,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         # Build dashboard URL if we have the required info
         dashboard_url = None
-        space_id = self.settings.get("space_id")
+        space_id = self._space_id_for_payment(payment)
         if transaction_id and space_id:
             dashboard_url = (
                 f"https://checkout.postfinance.ch/s/{space_id}"
@@ -1353,3 +1385,83 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # For refunds, clear the info
             obj.info_data = {"_shredded": True}
             obj.save(update_fields=["info"])
+
+
+class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
+    """
+    PostFinance provider that always uses the production space.
+
+    Offered during checkout only while the event is in test mode and test
+    credentials are configured, so organizers can verify their production
+    space end-to-end before taking the event live. Payments made through it
+    are real charges in the production space.
+
+    It shares all settings (credentials, display name, ...) with the main
+    provider and therefore has no settings section of its own.
+    """
+
+    identifier = "postfinance_prod"
+    verbose_name = "PostFinance (production space)"
+
+    def __init__(self, event: Event) -> None:
+        super().__init__(event)
+        # Share the settings namespace with the main provider so both use the
+        # same credentials and _enabled flag.
+        self.settings = SettingsSandbox(
+            "payment", PostFinancePaymentProvider.identifier, self.event
+        )
+
+    @property
+    def settings_form_fields(self) -> OrderedDict:
+        # No own settings section — everything is configured on the main
+        # provider, whose settings this provider shares.
+        return OrderedDict()
+
+    def settings_content_render(self, request: HttpRequest) -> str:
+        return ""
+
+    @property
+    def public_name(self) -> str:
+        """
+        Return the name shown to customers during checkout.
+
+        Always suffixed with "(production space)" to distinguish it from the
+        test space provider offered alongside it in test mode.
+        """
+        return f"{self._base_public_name} ({_('production space')})"
+
+    @property
+    def test_mode_message(self) -> str:
+        """
+        Return a warning that this provider makes real charges in test mode.
+        """
+        return str(
+            _(
+                "This payment method uses your production PostFinance space. "
+                "Payments are real and will be charged even though the event "
+                "is in test mode."
+            )
+        )
+
+    def is_allowed(self, request: HttpRequest, total: Decimal | None = None) -> bool:
+        """
+        Only offer this provider while the event is in test mode.
+
+        Without test credentials the main provider already uses the
+        production space in test mode, so this provider would be redundant.
+        """
+        if not self.event.testmode or not self._has_test_credentials():
+            return False
+        return super().is_allowed(request, total)
+
+    def _get_credentials(self) -> tuple[str | None, str | None, str | None]:
+        """Always use the production space credentials."""
+        return self._get_credentials_for_mode("live")
+
+    def _get_client(self) -> PostFinanceClient:
+        """Always create a client for the production space."""
+        return self._get_client_for_mode("live")
+
+    def _space_id_for_payment(self, payment: OrderPayment) -> str | None:
+        """Transactions of this provider always live in the production space."""
+        return self.settings.get("space_id")

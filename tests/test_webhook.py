@@ -554,3 +554,181 @@ class TestWebhookIdempotency:
         )
 
         assert response.status_code == 200
+
+
+class TestWebhookSpaces:
+    @pytest.mark.django_db
+    def test_prod_provider_payment_is_processed(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """Payments made through the production space provider in test mode
+        must be found and confirmed by the webhook handler."""
+        event, order = webhook_env
+        order.testmode = True
+        order.status = Order.STATUS_PENDING
+        order.save()
+
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.FULFILL
+        mock_transaction.payment_connector_configuration = MagicMock()
+        mock_transaction.payment_connector_configuration.name = "TWINT"
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance_prod",
+                amount=order.total,
+                info=json.dumps({"transaction_id": 424242}),
+                state=OrderPayment.PAYMENT_STATE_PENDING,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(424242)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+            assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+
+    @pytest.mark.django_db
+    def test_test_space_webhook_uses_test_credentials(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """A webhook from the configured test space must be processed with
+        the test credentials instead of being rejected as a space mismatch."""
+        event, order = webhook_env
+        event.settings.set("payment_postfinance_test_space_id", "99999")
+        event.settings.set("payment_postfinance_test_user_id", "88888")
+        event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+        order.testmode = True
+        order.status = Order.STATUS_PENDING
+        order.save()
+
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.FULFILL
+        mock_transaction.payment_connector_configuration = MagicMock()
+        mock_transaction.payment_connector_configuration.name = "TWINT"
+
+        used_spaces = []
+
+        def get_transaction(self, tid):
+            used_spaces.append(self.space_id)
+            return mock_transaction
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            get_transaction,
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"transaction_id": 434343}),
+                state=OrderPayment.PAYMENT_STATE_PENDING,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(434343, space_id=99999)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+        assert used_spaces == [99999]
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+            assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+
+    @pytest.mark.django_db
+    def test_unknown_space_is_ignored(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """A webhook from a space that is not configured on the payment's
+        event must not change the payment."""
+        event, order = webhook_env
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: pytest.fail("must not fetch the transaction"),
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"transaction_id": 454545}),
+                state=OrderPayment.PAYMENT_STATE_PENDING,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(454545, space_id=31337)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+            assert payment.state == OrderPayment.PAYMENT_STATE_PENDING
+
+    @pytest.mark.django_db
+    def test_prod_provider_refund_webhook_is_processed(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """Refunds of production space payments made in test mode must be
+        found and completed by the webhook handler."""
+        event, order = webhook_env
+        order.testmode = True
+        order.status = Order.STATUS_PAID
+        order.save()
+
+        mock_refund = MagicMock()
+        mock_refund.state = MagicMock()
+        mock_refund.state.value = "SUCCESSFUL"
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_refund",
+            lambda self, rid: mock_refund,
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance_prod",
+                amount=order.total,
+                info=json.dumps({"transaction_id": 464646}),
+                state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+            )
+            refund = order.refunds.create(
+                provider="postfinance_prod",
+                payment=payment,
+                amount=order.total,
+                info=json.dumps({"refund_id": 565656}),
+                state=OrderRefund.REFUND_STATE_TRANSIT,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(565656)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+
+        with scopes_disabled():
+            refund.refresh_from_db()
+            assert refund.state == OrderRefund.REFUND_STATE_DONE

@@ -11,6 +11,7 @@ import json
 import logging
 from typing import Any
 
+from django.db.models import Q
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils.translation import gettext_lazy as _
 from django.views import View
@@ -23,7 +24,7 @@ from pretix.helpers.urls import build_absolute_uri
 
 from ._types import PretixHttpRequest
 from .api import PostFinanceClient, PostFinanceError
-from .payment import FAILURE_STATES, SUCCESS_STATES
+from .payment import FAILURE_STATES, PROVIDER_IDENTIFIERS, SUCCESS_STATES
 
 
 def _validate_mode(raw: str | None) -> str | None:
@@ -164,13 +165,14 @@ def _get_client_ip(request: HttpRequest) -> str:
     return str(remote_addr) if remote_addr else "unknown"
 
 
-def _get_client_from_event(event: Any) -> PostFinanceClient | None:
-    """Create a PostFinanceClient from an event's settings."""
+def _get_client_from_event(event: Any, mode: str = "live") -> PostFinanceClient | None:
+    """Create a PostFinanceClient from an event's settings for a given space."""
     try:
         es = event.settings
-        space_id = es.get("payment_postfinance_space_id")
-        user_id = es.get("payment_postfinance_user_id")
-        auth_key = es.get("payment_postfinance_auth_key")
+        prefix = "payment_postfinance_test_" if mode == "test" else "payment_postfinance_"
+        space_id = es.get(f"{prefix}space_id")
+        user_id = es.get(f"{prefix}user_id")
+        auth_key = es.get(f"{prefix}auth_key")
 
         if not all([space_id, user_id, auth_key]):
             return None
@@ -185,13 +187,28 @@ def _get_client_from_event(event: Any) -> PostFinanceClient | None:
         return None
 
 
+def _mode_for_space(event: Any, space_id: int) -> str | None:
+    """
+    Return which configured space of the event matches the given space ID.
+
+    Returns "live" for the production space, "test" for the test space,
+    or None if the space is not configured on this event.
+    """
+    if str(event.settings.get("payment_postfinance_space_id")) == str(space_id):
+        return "live"
+    test_space_id = event.settings.get("payment_postfinance_test_space_id")
+    if test_space_id and str(test_space_id) == str(space_id):
+        return "test"
+    return None
+
+
 def _get_client_for_space(space_id: int) -> PostFinanceClient | None:
     """Find and return a PostFinanceClient for signature validation only."""
-    for event in Event.objects.filter(live=True).only("id", "slug")[:100]:
+    for event in Event.objects.filter(Q(live=True) | Q(testmode=True)).only("id", "slug")[:100]:
         try:
-            event_space_id = event.settings.get("payment_postfinance_space_id")
-            if str(event_space_id) == str(space_id):
-                return _get_client_from_event(event)
+            mode = _mode_for_space(event, space_id)
+            if mode:
+                return _get_client_from_event(event, mode)
         except Exception as e:
             logger.debug("Could not check event %s settings: %s", event.slug, e)
 
@@ -212,7 +229,7 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
     """
     payment = None
     for p in OrderPayment.objects.filter(
-        provider="postfinance",
+        provider__in=PROVIDER_IDENTIFIERS,
         info__icontains=str(entity_id),
     ):
         info_data = p.info_data or {}
@@ -224,8 +241,29 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
         # Entity not found in our database - this webhook isn't for us
         return (WEBHOOK_STATUS_NOT_FOUND, None)
 
+    # Verify the space_id matches one of the payment's event's configured
+    # spaces (production or test) and pick the matching credentials
+    mode = _mode_for_space(payment.order.event, space_id)
+    if mode is None:
+        if not payment.order.event.settings.get("payment_postfinance_space_id"):
+            # The payment is ours but the event lost its configuration
+            logger.error(
+                "PostFinance webhook: no space configured for event %s, transaction=%s",
+                payment.order.event.slug,
+                entity_id,
+            )
+            return (WEBHOOK_STATUS_NO_CLIENT, None)
+        logger.warning(
+            "PostFinance webhook: space_id mismatch for transaction %s "
+            "(webhook: %s, event: %s)",
+            entity_id,
+            space_id,
+            payment.order.event.settings.get("payment_postfinance_space_id"),
+        )
+        return (WEBHOOK_STATUS_OK, False)
+
     # Get client from the payment's event settings (avoids O(N) event scan)
-    client = _get_client_from_event(payment.order.event)
+    client = _get_client_from_event(payment.order.event, mode)
     if not client:
         logger.error(
             "PostFinance webhook: no client configured for event %s, transaction=%s",
@@ -233,18 +271,6 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
             entity_id,
         )
         return (WEBHOOK_STATUS_NO_CLIENT, None)
-
-    # Verify the space_id matches the payment's event configuration
-    event_space_id = payment.order.event.settings.get("payment_postfinance_space_id")
-    if str(event_space_id) != str(space_id):
-        logger.warning(
-            "PostFinance webhook: space_id mismatch for transaction %s "
-            "(webhook: %s, event: %s)",
-            entity_id,
-            space_id,
-            event_space_id,
-        )
-        return (WEBHOOK_STATUS_OK, False)
 
     try:
         transaction = client.get_transaction(int(entity_id))
@@ -335,7 +361,7 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
     """
     refund = None
     for r in OrderRefund.objects.filter(
-        provider="postfinance",
+        provider__in=PROVIDER_IDENTIFIERS,
         info__icontains=str(entity_id),
     ):
         info_data = r.info_data or {}
@@ -347,8 +373,29 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
         # Entity not found in our database - this webhook isn't for us
         return (WEBHOOK_STATUS_NOT_FOUND, None)
 
+    # Verify the space_id matches one of the refund's event's configured
+    # spaces (production or test) and pick the matching credentials
+    mode = _mode_for_space(refund.order.event, space_id)
+    if mode is None:
+        if not refund.order.event.settings.get("payment_postfinance_space_id"):
+            # The refund is ours but the event lost its configuration
+            logger.error(
+                "PostFinance webhook: no space configured for event %s, refund=%s",
+                refund.order.event.slug,
+                entity_id,
+            )
+            return (WEBHOOK_STATUS_NO_CLIENT, None)
+        logger.warning(
+            "PostFinance webhook: space_id mismatch for refund %s "
+            "(webhook: %s, event: %s)",
+            entity_id,
+            space_id,
+            refund.order.event.settings.get("payment_postfinance_space_id"),
+        )
+        return (WEBHOOK_STATUS_OK, False)
+
     # Get client from the refund's event settings (avoids O(N) event scan)
-    client = _get_client_from_event(refund.order.event)
+    client = _get_client_from_event(refund.order.event, mode)
     if not client:
         logger.error(
             "PostFinance webhook: no client configured for event %s, refund=%s",
@@ -356,18 +403,6 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
             entity_id,
         )
         return (WEBHOOK_STATUS_NO_CLIENT, None)
-
-    # Verify the space_id matches the refund's event configuration
-    event_space_id = refund.order.event.settings.get("payment_postfinance_space_id")
-    if str(event_space_id) != str(space_id):
-        logger.warning(
-            "PostFinance webhook: space_id mismatch for refund %s "
-            "(webhook: %s, event: %s)",
-            entity_id,
-            space_id,
-            event_space_id,
-        )
-        return (WEBHOOK_STATUS_OK, False)
 
     try:
         pf_refund = client.get_refund(int(entity_id))

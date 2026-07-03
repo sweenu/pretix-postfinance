@@ -10,7 +10,10 @@ from pretix.base.models import InvoiceAddress, Order, OrderPayment, OrderRefund
 from pretix.base.payment import PaymentException
 
 from pretix_postfinance.api import PostFinanceError
-from pretix_postfinance.payment import PostFinancePaymentProvider
+from pretix_postfinance.payment import (
+    PostFinancePaymentProvider,
+    PostFinanceProdSpacePaymentProvider,
+)
 
 
 @pytest.mark.django_db
@@ -1171,3 +1174,190 @@ def test_setup_webhooks_test_mode_missing_credentials(env):
 
     assert success is False
     assert "test" in message.lower()
+
+
+# Production space provider (test mode)
+
+
+def _set_test_credentials(event):
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+
+@pytest.mark.django_db
+def test_both_providers_registered(env):
+    event, _ = env
+    providers = event.get_payment_providers()
+
+    assert "postfinance" in providers
+    assert "postfinance_prod" in providers
+    assert isinstance(providers["postfinance_prod"], PostFinanceProdSpacePaymentProvider)
+
+
+@pytest.mark.django_db
+def test_prod_provider_shares_settings_with_main_provider(env):
+    event, _ = env
+    prov = PostFinanceProdSpacePaymentProvider(event)
+
+    assert prov.settings.get("space_id") == "12345"
+    assert prov.is_enabled is True
+
+
+@pytest.mark.django_db
+def test_prod_provider_has_no_own_settings_section(env, rf):
+    event, _ = env
+    prov = PostFinanceProdSpacePaymentProvider(event)
+
+    assert prov.settings_form_fields == {}
+    assert prov.settings_content_render(rf.get("/")) == ""
+
+
+@pytest.mark.django_db
+def test_prod_provider_uses_live_credentials_in_testmode(testmode_env):
+    event, _ = testmode_env
+    _set_test_credentials(event)
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    space_id, user_id, auth_key = prov._get_credentials()
+
+    assert space_id == "12345"
+    assert user_id == "67890"
+    assert auth_key == "live-secret"
+
+
+@pytest.mark.django_db
+def test_prod_provider_client_targets_live_space_in_testmode(testmode_env, monkeypatch):
+    event, _ = testmode_env
+    _set_test_credentials(event)
+
+    captured = {}
+
+    def mock_init(self, space_id, user_id, api_secret):
+        captured["space_id"] = space_id
+
+    monkeypatch.setattr("pretix_postfinance.payment.PostFinanceClient.__init__", mock_init)
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    prov._get_client()
+
+    assert captured["space_id"] == 12345
+
+
+@pytest.mark.django_db
+def test_prod_provider_not_allowed_outside_testmode(env, monkeypatch):
+    event, _ = env
+    event.testmode = False
+    _set_test_credentials(event)
+
+    monkeypatch.setattr(
+        "pretix.base.payment.BasePaymentProvider.is_allowed",
+        lambda self, request, total=None: True,
+    )
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.is_allowed(request=None) is False
+
+
+@pytest.mark.django_db
+def test_prod_provider_not_allowed_without_test_credentials(testmode_env, monkeypatch):
+    event, _ = testmode_env
+
+    monkeypatch.setattr(
+        "pretix.base.payment.BasePaymentProvider.is_allowed",
+        lambda self, request, total=None: True,
+    )
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.is_allowed(request=None) is False
+
+
+@pytest.mark.django_db
+def test_prod_provider_allowed_in_testmode_with_test_credentials(testmode_env, monkeypatch):
+    event, _ = testmode_env
+    _set_test_credentials(event)
+
+    monkeypatch.setattr(
+        "pretix.base.payment.BasePaymentProvider.is_allowed",
+        lambda self, request, total=None: True,
+    )
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.is_allowed(request=None) is True
+
+
+@pytest.mark.django_db
+def test_prod_provider_public_name_has_production_space_suffix(testmode_env):
+    event, _ = testmode_env
+    _set_test_credentials(event)
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.public_name == "PostFinance (production space)"
+
+
+@pytest.mark.django_db
+def test_prod_provider_public_name_uses_custom_display_name(testmode_env):
+    event, _ = testmode_env
+    _set_test_credentials(event)
+    event.settings.set("payment_postfinance_public_name", "Swiss Payments")
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.public_name == "Swiss Payments (production space)"
+
+
+@pytest.mark.django_db
+def test_main_provider_public_name_has_test_space_suffix_in_testmode(testmode_env):
+    event, _ = testmode_env
+    _set_test_credentials(event)
+
+    prov = PostFinancePaymentProvider(event)
+    assert prov.public_name == "PostFinance (test space)"
+
+
+@pytest.mark.django_db
+def test_main_provider_public_name_unchanged_without_test_credentials(testmode_env):
+    event, _ = testmode_env
+
+    prov = PostFinancePaymentProvider(event)
+    assert prov.public_name == "PostFinance"
+
+
+@pytest.mark.django_db
+def test_main_provider_public_name_unchanged_outside_testmode(env):
+    event, _ = env
+    event.testmode = False
+    _set_test_credentials(event)
+
+    prov = PostFinancePaymentProvider(event)
+    assert prov.public_name == "PostFinance"
+
+
+@pytest.mark.django_db
+def test_prod_provider_test_mode_message_warns_about_real_charges(testmode_env):
+    event, _ = testmode_env
+    _set_test_credentials(event)
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    message = prov.test_mode_message
+
+    assert "production" in message.lower()
+    assert "real" in message.lower()
+
+
+@pytest.mark.django_db
+def test_space_id_for_payment(env):
+    event, order = env
+    _set_test_credentials(event)
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+
+    # Live order -> live space for both providers
+    assert PostFinancePaymentProvider(event)._space_id_for_payment(payment) == "12345"
+    assert PostFinanceProdSpacePaymentProvider(event)._space_id_for_payment(payment) == "12345"
+
+    # Test mode order -> test space for the main provider, live space for
+    # the production space provider
+    order.testmode = True
+    order.save()
+    assert PostFinancePaymentProvider(event)._space_id_for_payment(payment) == "99999"
+    assert PostFinanceProdSpacePaymentProvider(event)._space_id_for_payment(payment) == "12345"
