@@ -23,7 +23,7 @@ from pretix.helpers.urls import build_absolute_uri
 
 from ._types import PretixHttpRequest
 from .api import PostFinanceClient, PostFinanceError
-from .payment import FAILURE_STATES, PROVIDER_IDENTIFIERS, SUCCESS_STATES
+from .payment import FAILURE_STATES, SUCCESS_STATES
 
 
 def _validate_mode(raw: str | None) -> str | None:
@@ -212,7 +212,7 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
     """
     payment = None
     for p in OrderPayment.objects.filter(
-        provider__in=PROVIDER_IDENTIFIERS,
+        provider="postfinance",
         info__icontains=str(entity_id),
     ):
         info_data = p.info_data or {}
@@ -335,7 +335,7 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
     """
     refund = None
     for r in OrderRefund.objects.filter(
-        provider__in=PROVIDER_IDENTIFIERS,
+        provider="postfinance",
         info__icontains=str(entity_id),
     ):
         info_data = r.info_data or {}

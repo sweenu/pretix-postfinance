@@ -6,6 +6,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from django import forms
+from django.conf import settings as django_settings
 from django.contrib import messages
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db.models import Sum
@@ -25,7 +26,6 @@ from postfinancecheckout.models import (
 from pretix.base.forms import SecretKeySettingsField
 from pretix.base.models import OrderPayment, OrderRefund
 from pretix.base.payment import BasePaymentProvider, PaymentException
-from pretix.base.settings import SettingsSandbox
 from pretix.base.templatetags.money import money_filter
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
@@ -33,7 +33,7 @@ from pretix.multidomain.urlreverse import build_absolute_uri
 from .api import PostFinanceClient, PostFinanceError
 
 if TYPE_CHECKING:
-    from pretix.base.models import Event, Order
+    from pretix.base.models import Order
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,17 @@ ERROR_STATUS_MESSAGES = {
 }
 
 PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
+
+# info_data keys describing a payment charged in a different currency than
+# the event's. Written when a transaction is created, they snapshot the
+# conversion so refunds and displays use the rate the customer was charged
+# at, not the current setting.
+FX_INFO_KEYS = (
+    "fx_rate",
+    "fx_base_currency",
+    "charged_currency",
+    "charged_amount",
+)
 
 
 class PostFinancePaymentProvider(BasePaymentProvider):
@@ -327,6 +338,41 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         required=False,
                     ),
                 ),
+                (
+                    "alt_currency",
+                    forms.ChoiceField(
+                        label=_("Alternative payment currency"),
+                        help_text=_(
+                            "Offer customers the choice to be charged in this currency "
+                            "instead of {currency}. pretix keeps all accounting (orders, "
+                            "invoices, refunds) in {currency}; only the charge sent to "
+                            "PostFinance is converted. Requires an exchange rate below."
+                        ).format(currency=self.event.currency),
+                        choices=[("", _("None"))]
+                        + [
+                            (c.alpha_3, f"{c.alpha_3} - {c.name}")
+                            for c in django_settings.CURRENCIES
+                            if c.alpha_3 != self.event.currency
+                        ],
+                        required=False,
+                    ),
+                ),
+                (
+                    "alt_currency_rate",
+                    forms.DecimalField(
+                        label=_("Exchange rate"),
+                        help_text=_(
+                            "How much customers are charged in the alternative currency "
+                            "per 1 {currency}. The rate in effect when a payment is "
+                            "started is kept for its refunds. Include a small margin to "
+                            "cover exchange rate fluctuations."
+                        ).format(currency=self.event.currency),
+                        min_value=Decimal("0.000001"),
+                        max_digits=12,
+                        decimal_places=6,
+                        required=False,
+                    ),
+                ),
             ]
         )
         return d
@@ -353,6 +399,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "this payment provider: {fields}"
                 ).format(fields=", ".join(missing))
                 raise ValidationError(msg)
+
+        if cleaned_data.get("alt_currency") and not cleaned_data.get("alt_currency_rate"):
+            raise ValidationError(
+                _("An exchange rate is required when an alternative payment currency is set.")
+            )
 
         return cleaned_data
 
@@ -569,6 +620,85 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         self._clear_session_transaction_id(request)
         return super().checkout_prepare(request, cart)
 
+    @property
+    def alt_currency_config(self) -> tuple[str, Decimal] | None:
+        """
+        The configured alternative payment currency and exchange rate.
+
+        Returns ``None`` unless a valid alternative currency different from
+        the event currency and a positive rate are configured.
+        """
+        currency = self.settings.get("alt_currency")
+        if not currency or currency == self.event.currency:
+            return None
+        try:
+            rate = self.settings.get("alt_currency_rate", as_type=Decimal)
+        except Exception:
+            return None
+        if not rate or rate <= 0:
+            return None
+        return str(currency), rate
+
+    def _convert(self, amount: Decimal, rate: Decimal) -> Decimal:
+        return (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    @property
+    def _session_pay_alt_key(self) -> str:
+        return f"payment_{self.identifier}_pay_alt"
+
+    @property
+    def payment_form_fields(self) -> OrderedDict:
+        fields: OrderedDict = OrderedDict()
+        config = self.alt_currency_config
+        if config:
+            currency, _rate = config
+            fields["pay_alt"] = forms.BooleanField(
+                label=_("Pay in {currency}").format(currency=currency),
+                required=False,
+            )
+        return fields
+
+    def payment_form_render(
+        self, request: HttpRequest, total: Decimal, order: Order | None = None
+    ) -> str:
+        form = self.payment_form(request)
+        config = self.alt_currency_config
+        if config and "pay_alt" in form.fields:
+            currency, rate = config
+            form.fields["pay_alt"].help_text = _(
+                "You will be charged {alt_amount} instead of {base_amount} "
+                "(exchange rate: 1 {base_currency} = {rate} {currency})."
+            ).format(
+                alt_amount=money_filter(self._convert(total, rate), currency),
+                base_amount=money_filter(total, self.event.currency),
+                base_currency=self.event.currency,
+                rate=rate.normalize(),
+                currency=currency,
+            )
+        template = get_template(self.payment_form_template_name)
+        return template.render({"request": request, "form": form})
+
+    def _fx_from_request(
+        self, request: HttpRequest, payment: OrderPayment
+    ) -> dict[str, str] | None:
+        """
+        Resolve the customer's currency choice into an FX snapshot.
+
+        Returns ``None`` when the payment should be charged in the event
+        currency, or a dict of ``FX_INFO_KEYS`` when the customer opted to
+        pay in the alternative currency.
+        """
+        config = self.alt_currency_config
+        if config is None or not request.session.get(self._session_pay_alt_key):
+            return None
+        currency, rate = config
+        return {
+            "fx_rate": str(rate),
+            "fx_base_currency": str(self.event.currency),
+            "charged_currency": currency,
+            "charged_amount": str(self._convert(payment.amount, rate)),
+        }
+
     def _get_request_payment(self, request: HttpRequest) -> OrderPayment | None:
         resolver_match = getattr(request, "resolver_match", None)
         kwargs = getattr(resolver_match, "kwargs", None) or {}
@@ -644,9 +774,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         request.session.pop(self._session_transaction_id_key, None)
         request.session.pop(self._session_transaction_payment_id_key, None)
 
-    def _set_pending_transaction_id(self, payment: OrderPayment, transaction_id: int) -> None:
+    def _set_pending_transaction_id(
+        self,
+        payment: OrderPayment,
+        transaction_id: int,
+        fx: dict[str, str] | None = None,
+    ) -> None:
         info = payment.info_data
+        # Drop any FX snapshot from a previous attempt: a retry may have
+        # switched between event currency and alternative currency.
+        for key in FX_INFO_KEYS:
+            info.pop(key, None)
         info[PENDING_TRANSACTION_ID_KEY] = transaction_id
+        if fx:
+            info.update(fx)
         payment.info_data = info
         payment.save(update_fields=["info"])
 
@@ -658,19 +799,28 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         payment.info_data = info
         payment.save(update_fields=["info"])
 
-    def _get_transaction_currency(self, payment: OrderPayment) -> str:
-        """
-        Return the currency PostFinance should charge for this payment.
-
-        Defaults to the event currency; providers that charge in a
-        different currency than the one pretix accounts in can override
-        this together with ``_build_payment_transaction_line_items``.
-        """
-        return payment.order.event.currency
-
     def _build_payment_transaction_line_items(
-        self, payment: OrderPayment, detailed_line_items: bool = False
+        self,
+        payment: OrderPayment,
+        detailed_line_items: bool = False,
+        fx: dict[str, str] | None = None,
     ) -> list[LineItemCreate]:
+        if fx:
+            # A single aggregate line item is used for converted charges,
+            # even when detailed line items were requested: PostFinance
+            # requires line items to sum to the transaction amount, and
+            # converting each position separately would accumulate
+            # rounding drift.
+            return [
+                LineItemCreate(
+                    name=str(_("Payment for order {code}")).format(code=payment.order.code),
+                    quantity=1,
+                    amountIncludingTax=float(Decimal(fx["charged_amount"])),
+                    type=LineItemType.PRODUCT,
+                    uniqueId=f"payment-{payment.pk}",
+                )
+            ]
+
         if detailed_line_items and payment.amount == payment.order.total:
             return self._build_line_items(
                 {
@@ -749,11 +899,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         return billing_address
 
     def _create_payment_transaction(
-        self, payment: OrderPayment, detailed_line_items: bool = False
+        self,
+        payment: OrderPayment,
+        detailed_line_items: bool = False,
+        fx: dict[str, str] | None = None,
     ) -> tuple[int, str]:
         client = self._get_client()
         line_items = self._build_payment_transaction_line_items(
-            payment, detailed_line_items=detailed_line_items
+            payment, detailed_line_items=detailed_line_items, fx=fx
         )
 
         success_url = build_absolute_uri(
@@ -776,7 +929,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         )
 
         transaction = client.create_transaction(
-            currency=self._get_transaction_currency(payment),
+            currency=fx["charged_currency"] if fx else payment.order.event.currency,
             line_items=line_items,
             success_url=success_url,
             failed_url=failed_url,
@@ -892,9 +1045,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         self._clear_pending_transaction_id(payment)
 
         try:
-            transaction_id, payment_page_url = self._create_payment_transaction(payment)
+            fx = self._fx_from_request(request, payment)
+            transaction_id, payment_page_url = self._create_payment_transaction(payment, fx=fx)
             self._set_session_transaction_id(request, payment, transaction_id)
-            self._set_pending_transaction_id(payment, transaction_id)
+            self._set_pending_transaction_id(payment, transaction_id, fx=fx)
             logger.info(
                 "Created PostFinance transaction %s for payment %s",
                 transaction_id,
@@ -942,7 +1096,23 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             "provider": self,
             "description": self.settings.get("description", as_type=LazyI18nString),
         }
-        return template.render(ctx)
+        html = template.render(ctx)
+
+        config = self.alt_currency_config
+        if config and request.session.get(self._session_pay_alt_key):
+            currency, rate = config
+            html += format_html(
+                "<p>{}</p>",
+                _(
+                    "You will be charged in {currency} "
+                    "(exchange rate: 1 {base_currency} = {rate} {currency})."
+                ).format(
+                    currency=currency,
+                    base_currency=self.event.currency,
+                    rate=rate.normalize(),
+                ),
+            )
+        return html
 
     def execute_payment(self, request: HttpRequest, payment: OrderPayment) -> str | None:
         """
@@ -955,11 +1125,13 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         if not transaction_id:
             try:
+                fx = self._fx_from_request(request, payment)
                 transaction_id, payment_page_url = self._create_payment_transaction(
                     payment,
                     detailed_line_items=request.method == "GET",
+                    fx=fx,
                 )
-                self._set_pending_transaction_id(payment, transaction_id)
+                self._set_pending_transaction_id(payment, transaction_id, fx=fx)
                 logger.info(
                     "Created PostFinance transaction %s for payment %s during execute_payment",
                     transaction_id,
@@ -1164,9 +1336,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         info_data = payment.info_data or {}
         payment_method = info_data.get("payment_method")
-        if payment_method:
-            return f"{self.public_name} ({payment_method})"
-        return str(self.public_name)
+        base = (
+            f"{self.public_name} ({payment_method})"
+            if payment_method
+            else str(self.public_name)
+        )
+
+        charged_amount = info_data.get("charged_amount")
+        charged_currency = info_data.get("charged_currency")
+        if charged_amount and charged_currency:
+            return str(_("{payment_method} — charged as {alt_amount}")).format(
+                payment_method=base,
+                alt_amount=money_filter(Decimal(str(charged_amount)), charged_currency),
+            )
+        return base
 
     def payment_control_render_short(self, payment: OrderPayment) -> str:
         """
@@ -1200,10 +1383,41 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Return the refund amount in the transaction's charge currency.
 
-        Returning ``None`` requests a refund of the transaction's full
-        remaining amount from PostFinance.
+        Payments charged in the event currency refund their amount as-is.
+        For payments charged in the alternative currency, partial refunds
+        are converted with the rate snapshotted on the payment; refunds
+        that return the payment's full remaining amount are sent without
+        an explicit amount (``None``) so PostFinance refunds the exact
+        remaining charge, immune to conversion rounding.
         """
-        return cast("Decimal", refund.amount)
+        payment = refund.payment
+        info = payment.info_data or {}
+        charged_currency = info.get("charged_currency")
+        if not charged_currency or charged_currency == self.event.currency:
+            return cast("Decimal", refund.amount)
+
+        already_refunded = payment.refunds.exclude(pk=refund.pk).filter(
+            state__in=(
+                OrderRefund.REFUND_STATE_DONE,
+                OrderRefund.REFUND_STATE_TRANSIT,
+                OrderRefund.REFUND_STATE_CREATED,
+            ),
+        ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        if refund.amount >= payment.amount - already_refunded:
+            return None
+
+        rate_raw = info.get("fx_rate")
+        if not rate_raw:
+            raise PaymentException(
+                str(
+                    _(
+                        "The exchange rate used for this payment is unknown, so the refund "
+                        "amount cannot be converted to {currency}. Please refund manually "
+                        "in the PostFinance dashboard."
+                    ).format(currency=charged_currency)
+                )
+            )
+        return self._convert(cast("Decimal", refund.amount), Decimal(str(rate_raw)))
 
     def execute_refund(self, refund: OrderRefund, user: str = "system") -> None:
         """
@@ -1389,277 +1603,3 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # For refunds, clear the info
             obj.info_data = {"_shredded": True}
             obj.save(update_fields=["info"])
-
-
-class PostFinanceCHFPaymentProvider(PostFinancePaymentProvider):
-    """
-    PostFinance Checkout payment provider that charges in Swiss francs.
-
-    Shown as a separate payment method on events priced in another
-    currency (typically EUR). The amount owed is converted to CHF with an
-    organizer-configured exchange rate and PostFinance is instructed to
-    charge the converted amount in CHF, while pretix keeps all accounting
-    in the event currency. The rate used is snapshotted on each payment
-    so refunds convert back consistently even after the setting changes.
-
-    API credentials and webhooks are shared with the main PostFinance
-    provider and must be configured there.
-    """
-
-    identifier = "postfinance_chf"
-    verbose_name = "PostFinance (CHF)"
-    charge_currency = "CHF"
-
-    # Credential settings live on the main provider so both providers
-    # always talk to the same PostFinance space.
-    _credential_settings = (
-        "space_id",
-        "user_id",
-        "auth_key",
-        "test_space_id",
-        "test_user_id",
-        "test_auth_key",
-    )
-
-    def __init__(self, event: Event) -> None:
-        super().__init__(event)
-        self.main_settings = SettingsSandbox(
-            "payment", PostFinancePaymentProvider.identifier, event
-        )
-
-    def _has_test_credentials(self) -> bool:
-        return bool(
-            self.main_settings.get("test_space_id")
-            and self.main_settings.get("test_user_id")
-            and self.main_settings.get("test_auth_key")
-        )
-
-    def _get_credentials_for_mode(
-        self, mode: Literal["live", "test"]
-    ) -> tuple[str | None, str | None, str | None]:
-        if mode == "test":
-            return (
-                self.main_settings.get("test_space_id"),
-                self.main_settings.get("test_user_id"),
-                self.main_settings.get("test_auth_key"),
-            )
-        return (
-            self.main_settings.get("space_id"),
-            self.main_settings.get("user_id"),
-            self.main_settings.get("auth_key"),
-        )
-
-    @property
-    def exchange_rate(self) -> Decimal | None:
-        """The configured exchange rate (1 event currency = x CHF), if valid."""
-        try:
-            rate = self.settings.get("chf_rate", as_type=Decimal)
-        except Exception:
-            return None
-        if not rate or rate <= 0:
-            return None
-        return rate
-
-    def _require_rate(self) -> Decimal:
-        rate = self.exchange_rate
-        if rate is None:
-            raise PaymentException(
-                str(
-                    _(
-                        "This payment method is not correctly configured. "
-                        "Please choose another one."
-                    )
-                )
-            )
-        return rate
-
-    def _convert(self, amount: Decimal, rate: Decimal) -> Decimal:
-        return (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-    @property
-    def settings_form_fields(self) -> OrderedDict:
-        fields = super().settings_form_fields
-        for key in self._credential_settings:
-            fields.pop(key, None)
-        fields["chf_rate"] = forms.DecimalField(
-            label=_("Exchange rate"),
-            help_text=_(
-                "How many CHF customers are charged per 1 {currency}. The rate in "
-                "effect when a payment is started is kept for its refunds. Include "
-                "a small margin to cover exchange rate fluctuations."
-            ).format(currency=self.event.currency),
-            min_value=Decimal("0.000001"),
-            max_digits=12,
-            decimal_places=6,
-            required=True,
-        )
-        return fields
-
-    def settings_form_clean(self, cleaned_data: dict) -> dict:
-        if cleaned_data.get("_enabled"):
-            space_id, user_id, auth_key = self._get_credentials_for_mode("live")
-            if not all([space_id, user_id, auth_key]):
-                raise ValidationError(
-                    _(
-                        "Configure and save the credentials of the PostFinance payment "
-                        "provider before enabling this payment method."
-                    )
-                )
-        return cleaned_data
-
-    def settings_content_render(self, request: HttpRequest) -> str:
-        return format_html(
-            '<div class="alert alert-info">{}</div>',
-            _(
-                "This payment method charges your customers in CHF while the event "
-                "keeps its prices in {currency}. It uses the API credentials and "
-                "webhooks configured on the PostFinance payment provider."
-            ).format(currency=self.event.currency),
-        )
-
-    def is_allowed(self, request: HttpRequest, total: Decimal | None = None) -> bool:
-        return (
-            self.event.currency != self.charge_currency
-            and self.exchange_rate is not None
-            and super().is_allowed(request, total)
-        )
-
-    def order_change_allowed(self, order: Order, request: HttpRequest | None = None) -> bool:
-        return (
-            self.event.currency != self.charge_currency
-            and self.exchange_rate is not None
-            and super().order_change_allowed(order, request)
-        )
-
-    def _get_transaction_currency(self, payment: OrderPayment) -> str:
-        return self.charge_currency
-
-    def _build_payment_transaction_line_items(
-        self, payment: OrderPayment, detailed_line_items: bool = False
-    ) -> list[LineItemCreate]:
-        # A single aggregate line item is used regardless of
-        # detailed_line_items: PostFinance requires line items to sum to
-        # the transaction amount, and converting each position separately
-        # would accumulate rounding drift.
-        rate = self._require_rate()
-        return [
-            LineItemCreate(
-                name=str(_("Payment for order {code}")).format(code=payment.order.code),
-                quantity=1,
-                amountIncludingTax=float(self._convert(payment.amount, rate)),
-                type=LineItemType.PRODUCT,
-                uniqueId=f"payment-{payment.pk}",
-            )
-        ]
-
-    def _set_pending_transaction_id(self, payment: OrderPayment, transaction_id: int) -> None:
-        # Snapshot the conversion next to the transaction ID so later
-        # refunds and displays use the rate the customer was charged at,
-        # not the current setting.
-        rate = self._require_rate()
-        info = payment.info_data
-        info.update(
-            {
-                PENDING_TRANSACTION_ID_KEY: transaction_id,
-                "fx_rate": str(rate),
-                "fx_base_currency": self.event.currency,
-                "charged_currency": self.charge_currency,
-                "charged_amount": str(self._convert(payment.amount, rate)),
-            }
-        )
-        payment.info_data = info
-        payment.save(update_fields=["info"])
-
-    def _refund_transaction_amount(self, refund: OrderRefund) -> Decimal | None:
-        payment = refund.payment
-        # If this refund returns everything that is left of the payment,
-        # let PostFinance refund the transaction's exact remaining CHF
-        # amount instead of converting, so no centimes are lost to rounding.
-        already_refunded = payment.refunds.exclude(pk=refund.pk).filter(
-            state__in=(
-                OrderRefund.REFUND_STATE_DONE,
-                OrderRefund.REFUND_STATE_TRANSIT,
-                OrderRefund.REFUND_STATE_CREATED,
-            ),
-        ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-        if refund.amount >= payment.amount - already_refunded:
-            return None
-
-        rate_raw = (payment.info_data or {}).get("fx_rate")
-        if not rate_raw:
-            raise PaymentException(
-                str(
-                    _(
-                        "The exchange rate used for this payment is unknown, so the refund "
-                        "amount cannot be converted to CHF. Please refund manually in the "
-                        "PostFinance dashboard."
-                    )
-                )
-            )
-        return self._convert(refund.amount, Decimal(str(rate_raw)))
-
-    def payment_form_render(
-        self, request: HttpRequest, total: Decimal, order: Order | None = None
-    ) -> str:
-        html = super().payment_form_render(request, total, order)
-        rate = self.exchange_rate
-        if rate is None:
-            return html
-        return html + format_html(
-            "<p>{}</p>",
-            _(
-                "Your payment of {base_amount} will be charged as {chf_amount} "
-                "(exchange rate: 1 {base_currency} = {rate} CHF)."
-            ).format(
-                base_amount=money_filter(total, self.event.currency),
-                chf_amount=money_filter(self._convert(total, rate), self.charge_currency),
-                base_currency=self.event.currency,
-                rate=rate.normalize(),
-            ),
-        )
-
-    def checkout_confirm_render(
-        self, request: HttpRequest, order: Order | None = None, info_data: dict | None = None
-    ) -> str:
-        html = super().checkout_confirm_render(request, order, info_data)
-        rate = self.exchange_rate
-        if rate is None:
-            return html
-        return html + format_html(
-            "<p>{}</p>",
-            _(
-                "You will be charged in CHF (exchange rate: 1 {base_currency} = {rate} CHF)."
-            ).format(base_currency=self.event.currency, rate=rate.normalize()),
-        )
-
-    def payment_presale_render(self, payment: OrderPayment) -> str:
-        base = super().payment_presale_render(payment)
-        charged_amount = (payment.info_data or {}).get("charged_amount")
-        if charged_amount:
-            return str(
-                _("{payment_method} — charged as {chf_amount}")
-            ).format(
-                payment_method=base,
-                chf_amount=money_filter(Decimal(str(charged_amount)), self.charge_currency),
-            )
-        return base
-
-    def payment_control_render_short(self, payment: OrderPayment) -> str:
-        info_data = payment.info_data or {}
-        transaction_id = info_data.get("transaction_id")
-        if transaction_id:
-            return f"PostFinance CHF ({transaction_id})"
-        return "PostFinance CHF"
-
-    def refund_control_render_short(self, refund: OrderRefund) -> str:
-        info_data = refund.info_data or {}
-        refund_id = info_data.get("refund_id")
-        if refund_id:
-            return f"PostFinance CHF ({refund_id})"
-        return "PostFinance CHF"
-
-
-PROVIDER_IDENTIFIERS = (
-    PostFinancePaymentProvider.identifier,
-    PostFinanceCHFPaymentProvider.identifier,
-)
