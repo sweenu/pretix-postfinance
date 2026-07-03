@@ -48,13 +48,13 @@ class PostFinanceRefundFailedLogEntryType(OrderLogEntryType):
 
 
 @receiver(register_payment_providers, dispatch_uid="payment_postfinance")
-def register_payment_provider(sender: Any, **kwargs: Any) -> type[Any]:
+def register_payment_provider(sender: Any, **kwargs: Any) -> list[type[Any]]:
     """
-    Register the PostFinance payment provider with pretix.
+    Register the PostFinance payment providers with pretix.
     """
-    from .payment import PostFinancePaymentProvider
+    from .payment import PostFinanceCHFPaymentProvider, PostFinancePaymentProvider
 
-    return PostFinancePaymentProvider
+    return [PostFinancePaymentProvider, PostFinanceCHFPaymentProvider]
 
 
 @receiver(html_head, dispatch_uid="postfinance_control_html_head")

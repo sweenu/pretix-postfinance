@@ -25,6 +25,12 @@
             <dd>{{ payment_info.payment_method }}</dd>
         {% endif %}
 
+        {% if payment_info.charged_amount %}
+            <dt>{% trans "Charged amount" %}</dt>
+            <dd>{{ payment_info.charged_amount }} {{ payment_info.charged_currency }}
+                ({% trans "exchange rate" %}: 1 {{ payment_info.fx_base_currency }} = {{ payment_info.fx_rate }} {{ payment_info.charged_currency }})</dd>
+        {% endif %}
+
         {% if payment_info.error %}
             <dt style="color: #c00;">{% trans "Error" %}</dt>
             <dd style="color: #c00;">

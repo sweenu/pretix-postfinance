@@ -75,6 +75,30 @@ Configure the plugin in your pretix settings with:
 - Payment processing via PostFinance Checkout
 - Full and partial refund support
 - Webhook handling for payment and refund notifications
+- Optional "PostFinance (CHF)" payment method that charges customers in CHF
+  on events priced in another currency (see below)
+
+### Charging in CHF on non-CHF events
+
+The plugin registers a second payment method, **PostFinance (CHF)**, intended
+for events priced in EUR (or any non-CHF currency) that want to offer their
+Swiss customers the option to pay in Swiss francs. pretix itself keeps all
+accounting (orders, invoices, refunds) in the event currency; only the charge
+sent to PostFinance is converted.
+
+To use it:
+
+1. Configure and enable the regular PostFinance provider first — the CHF
+   method reuses its API credentials and webhooks.
+2. Enable **PostFinance (CHF)** in the event's payment settings and set the
+   **exchange rate** (how many CHF are charged per 1 unit of the event
+   currency). Include a small margin to cover exchange rate fluctuations.
+
+The rate in effect when a payment is started is stored on the payment and is
+also used to convert partial refunds back to CHF; full refunds are refunded
+by PostFinance at the exact remaining transaction amount. The charged CHF
+amount and rate are shown to the customer during checkout and to organizers
+in the order's payment details.
 
 ## License
 
