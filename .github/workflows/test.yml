@@ -53,8 +53,6 @@ jobs:
     if: github.event_name == 'pull_request'
     permissions:
       contents: read
-      issues: write
-      pull-requests: write
 
     steps:
       - uses: actions/checkout@v4
@@ -148,52 +146,6 @@ jobs:
           if diff < -5:
               print(f"::warning::Coverage decreased by {abs(diff):.2f}%")
           EOF
-
-      - name: Comment on PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const baseCov = '${{ steps.coverage-diff.outputs.base_coverage }}';
-            const prCov = '${{ steps.coverage-diff.outputs.pr_coverage }}';
-            const diff = '${{ steps.coverage-diff.outputs.coverage_diff }}';
-            const emoji = '${{ steps.coverage-diff.outputs.emoji }}';
-
-            const body = `## Coverage Report ${emoji}
-
-            | Metric | Value |
-            |--------|-------|
-            | Base branch coverage | ${baseCov}% |
-            | PR coverage | ${prCov}% |
-            | Coverage change | ${diff}% |
-            `;
-
-            // Find existing comment
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            const botComment = comments.find(comment =>
-              comment.user.type === 'Bot' &&
-              comment.body.includes('Coverage Report')
-            );
-
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: body
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body
-              });
-            }
 
   typecheck:
     runs-on: ubuntu-latest
