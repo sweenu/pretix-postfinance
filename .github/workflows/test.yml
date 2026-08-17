@@ -26,15 +26,15 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
-      - name: Create virtual environment
-        run: uv venv
-
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        # Install from uv.lock. "uv pip install" ignores the lockfile and
+        # resolves dependencies fresh on every run, so an upstream release of
+        # any transitive dependency can break CI without a code change.
+        run: uv sync --extra dev
 
       - name: Run tests with coverage
         run: |
-          uv run pytest tests/ \
+          uv run --no-sync pytest tests/ \
             --cov=pretix_postfinance \
             --cov-report=xml \
             --cov-report=term-missing \
@@ -69,15 +69,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
-      - name: Create virtual environment
-        run: uv venv
-
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        # Install from uv.lock, see the test job above.
+        run: uv sync --extra dev
 
       - name: Get coverage for PR branch
         run: |
-          uv run pytest tests/ \
+          uv run --no-sync pytest tests/ \
             --cov=pretix_postfinance \
             --cov-report=json \
             -q
@@ -86,8 +84,8 @@ jobs:
       - name: Get coverage for base branch
         run: |
           git checkout ${{ github.event.pull_request.base.sha }}
-          uv pip install -e ".[dev]" --quiet
-          uv run pytest tests/ \
+          uv sync --extra dev --quiet
+          uv run --no-sync pytest tests/ \
             --cov=pretix_postfinance \
             --cov-report=json \
             -q 2>/dev/null || echo '{"totals": {"percent_covered": 0}}' > coverage.json
@@ -97,7 +95,7 @@ jobs:
       - name: Compare coverage
         id: coverage-diff
         run: |
-          uv run python << 'EOF'
+          uv run --no-sync python << 'EOF'
           import json
           import os
 
@@ -238,11 +236,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
-      - name: Create virtual environment
-        run: uv venv
-
       - name: Install dependencies
-        run: uv pip install -e ".[dev]"
+        # Install from uv.lock, see the test job above.
+        run: uv sync --extra dev
 
       - name: Run ruff
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
