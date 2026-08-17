@@ -68,9 +68,17 @@ PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
 SESSION_TRANSACTION_ID_KEY = "payment_postfinance_transaction_id"
 SESSION_TRANSACTION_PAYMENT_ID_KEY = "payment_postfinance_transaction_payment_id"
 
+# info_data key holding the ID of the space a transaction was created in.
+# Transaction and refund IDs are only unique within a space, so the space is
+# part of an entity's identity and must be persisted alongside the ID.
+SPACE_ID_KEY = "space_id"
+
+MAIN_PROVIDER_IDENTIFIER = "postfinance"
+PROD_PROVIDER_IDENTIFIER = "postfinance_prod"
+
 # All provider identifiers used by this plugin. Payments and refunds may be
 # stored under any of these.
-PROVIDER_IDENTIFIERS = ("postfinance", "postfinance_prod")
+PROVIDER_IDENTIFIERS = (MAIN_PROVIDER_IDENTIFIER, PROD_PROVIDER_IDENTIFIER)
 
 
 class PostFinancePaymentProvider(BasePaymentProvider):
@@ -81,7 +89,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     through the PostFinance Checkout API.
     """
 
-    identifier = "postfinance"
+    identifier = MAIN_PROVIDER_IDENTIFIER
     verbose_name = "PostFinance"
     abort_pending_allowed = False
     execute_payment_needs_user = True
@@ -145,16 +153,37 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return self._get_credentials_for_mode("test")
         return self._get_credentials_for_mode("live")
 
+    def _mode_for_payment(self, payment: OrderPayment) -> Literal["live", "test"]:
+        """
+        Return which space the payment's transaction lives in.
+
+        Prefers the space that was recorded when the transaction was created.
+        Payments created before the space was persisted, or whose recorded
+        space is no longer configured, fall back to the order's test mode
+        flag: those were created in the test space if test credentials were
+        configured at the time.
+        """
+        recorded_space_id = (payment.info_data or {}).get(SPACE_ID_KEY)
+        if recorded_space_id:
+            test_space_id = self.settings.get("test_space_id")
+            if test_space_id and str(recorded_space_id) == str(test_space_id):
+                return "test"
+            space_id = self.settings.get("space_id")
+            if space_id and str(recorded_space_id) == str(space_id):
+                return "live"
+
+        if payment.order.testmode and self._has_test_credentials():
+            return "test"
+        return "live"
+
     def _space_id_for_payment(self, payment: OrderPayment) -> str | None:
         """
         Return the ID of the space the payment's transaction lives in.
-
-        Payments made while the order was in test mode were created in the
-        test space (if test credentials are configured).
         """
-        if payment.order.testmode and self._has_test_credentials():
-            return self.settings.get("test_space_id")
-        return self.settings.get("space_id")
+        recorded_space_id = (payment.info_data or {}).get(SPACE_ID_KEY)
+        if recorded_space_id:
+            return str(recorded_space_id)
+        return self._get_credentials_for_mode(self._mode_for_payment(payment))[0]
 
     @property
     def _base_public_name(self) -> str:
@@ -449,6 +478,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         )
         return self._get_client_for_mode(mode)
 
+    def _get_client_for_payment(self, payment: OrderPayment) -> PostFinanceClient:
+        """
+        Create a client for the space the payment's transaction lives in.
+
+        Actions on an existing transaction (refunds, status lookups) must talk
+        to the space that transaction was created in, which is not necessarily
+        the space `event.testmode` points at today.
+        """
+        return self._get_client_for_mode(self._mode_for_payment(payment))
+
     def test_connection(
         self, mode: Literal["live", "test"] | None = None
     ) -> tuple[bool, str]:
@@ -666,9 +705,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         request.session.pop(SESSION_TRANSACTION_ID_KEY, None)
         request.session.pop(SESSION_TRANSACTION_PAYMENT_ID_KEY, None)
 
-    def _set_pending_transaction_id(self, payment: OrderPayment, transaction_id: int) -> None:
+    def _set_pending_transaction_id(
+        self, payment: OrderPayment, transaction_id: int, space_id: int
+    ) -> None:
         info = payment.info_data
         info[PENDING_TRANSACTION_ID_KEY] = transaction_id
+        info[SPACE_ID_KEY] = space_id
         payment.info_data = info
         payment.save(update_fields=["info"])
 
@@ -762,7 +804,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def _create_payment_transaction(
         self, payment: OrderPayment, detailed_line_items: bool = False
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, int]:
+        """
+        Create a PostFinance transaction for a payment.
+
+        Returns:
+            A tuple of (transaction ID, payment page URL, space ID). The space
+            is part of the transaction's identity and must be stored with it.
+        """
         client = self._get_client()
         line_items = self._build_payment_transaction_line_items(
             payment, detailed_line_items=detailed_line_items
@@ -813,7 +862,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 str(_("Failed to redirect to payment page. Please try again."))
             )
 
-        return transaction_id, payment_page_url
+        return transaction_id, payment_page_url, client.space_id
 
     def _build_line_items(self, cart: dict[str, Any], currency: str) -> list[LineItemCreate]:
         """
@@ -904,9 +953,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         self._clear_pending_transaction_id(payment)
 
         try:
-            transaction_id, payment_page_url = self._create_payment_transaction(payment)
+            transaction_id, payment_page_url, space_id = self._create_payment_transaction(payment)
             self._set_session_transaction_id(request, payment, transaction_id)
-            self._set_pending_transaction_id(payment, transaction_id)
+            self._set_pending_transaction_id(payment, transaction_id, space_id)
             logger.info(
                 "Created PostFinance transaction %s for payment %s",
                 transaction_id,
@@ -967,11 +1016,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         if not transaction_id:
             try:
-                transaction_id, payment_page_url = self._create_payment_transaction(
+                transaction_id, payment_page_url, space_id = self._create_payment_transaction(
                     payment,
                     detailed_line_items=request.method == "GET",
                 )
-                self._set_pending_transaction_id(payment, transaction_id)
+                self._set_pending_transaction_id(payment, transaction_id, space_id)
                 logger.info(
                     "Created PostFinance transaction %s for payment %s during execute_payment",
                     transaction_id,
@@ -1012,7 +1061,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 ) from e
 
         try:
-            client = self._get_client()
+            client = self._get_client_for_payment(payment)
             transaction = client.get_transaction(transaction_id)
 
             payment_method = None
@@ -1022,6 +1071,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             state = transaction.state
             payment.info_data = {
                 "transaction_id": transaction_id,
+                SPACE_ID_KEY: client.space_id,
                 "state": state.value if state else None,
                 "payment_method": payment_method,
                 "created_on": str(transaction.created_on) if transaction.created_on else None,
@@ -1083,6 +1133,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             logger.exception("PostFinance API error during execute_payment: %s", e)
             payment.info_data = {
                 "transaction_id": transaction_id,
+                SPACE_ID_KEY: self._space_id_for_payment(payment),
                 "error": str(e),
                 "error_code": e.error_code,
                 "error_status_code": e.status_code,
@@ -1097,6 +1148,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             logger.exception("Unexpected error during execute_payment: %s", e)
             payment.info_data = {
                 "transaction_id": transaction_id,
+                SPACE_ID_KEY: self._space_id_for_payment(payment),
                 "error": str(e),
                 "error_code": type(e).__name__,
             }
@@ -1180,8 +1232,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
         if transaction_id:
-            return f"PostFinance ({transaction_id})"
-        return "PostFinance"
+            return f"{self.verbose_name} ({transaction_id})"
+        return str(self.verbose_name)
 
     def payment_refund_supported(self, payment: OrderPayment) -> bool:
         """
@@ -1211,7 +1263,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             refund: The OrderRefund to process.
             user: The user performing the action (for audit logging).
         """
-        payment = refund.payment
+        payment = cast(OrderPayment, refund.payment)
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
 
@@ -1232,7 +1284,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
 
         try:
-            client = self._get_client()
+            client = self._get_client_for_payment(payment)
 
             # Generate a unique external ID for idempotency
             external_id = f"pretix-{self.event.slug}-{refund.order.code}-R-{refund.local_id}"
@@ -1248,6 +1300,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # Store refund info on the OrderRefund object
             refund.info_data = {
                 "refund_id": postfinance_refund.id,
+                SPACE_ID_KEY: client.space_id,
                 "state": postfinance_refund.state.value if postfinance_refund.state else None,
                 "amount": float(postfinance_refund.amount) if postfinance_refund.amount else None,
                 "created_on": str(postfinance_refund.created_on)
@@ -1362,8 +1415,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         info_data = refund.info_data or {}
         refund_id = info_data.get("refund_id")
         if refund_id:
-            return f"PostFinance ({refund_id})"
-        return "PostFinance"
+            return f"{self.verbose_name} ({refund_id})"
+        return str(self.verbose_name)
 
     def shred_payment_info(self, obj: OrderPayment | OrderRefund) -> None:
         """
@@ -1377,6 +1430,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             info_data = obj.info_data or {}
             obj.info_data = {
                 "transaction_id": info_data.get("transaction_id"),
+                SPACE_ID_KEY: info_data.get(SPACE_ID_KEY),
                 "state": info_data.get("state"),
                 "_shredded": True,
             }
@@ -1400,8 +1454,8 @@ class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
     provider and therefore has no settings section of its own.
     """
 
-    identifier = "postfinance_prod"
-    verbose_name = "PostFinance (production space)"
+    identifier = PROD_PROVIDER_IDENTIFIER
+    verbose_name = _("PostFinance (production space)")
 
     def __init__(self, event: Event) -> None:
         super().__init__(event)
@@ -1443,16 +1497,36 @@ class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
             )
         )
 
-    def is_allowed(self, request: HttpRequest, total: Decimal | None = None) -> bool:
+    def _offered_in_test_mode(self) -> bool:
         """
-        Only offer this provider while the event is in test mode.
+        Check whether this provider may be offered at all.
 
         Without test credentials the main provider already uses the
         production space in test mode, so this provider would be redundant.
         """
-        if not self.event.testmode or not self._has_test_credentials():
+        return bool(self.event.testmode) and self._has_test_credentials()
+
+    def is_allowed(self, request: HttpRequest, total: Decimal | None = None) -> bool:
+        """
+        Only offer this provider during checkout while the event is in test mode.
+        """
+        if not self._offered_in_test_mode():
             return False
-        return super().is_allowed(request, total)
+        # pretix's own signatures spell these parameters as non-optional even
+        # though they accept None, hence the casts.
+        return super().is_allowed(request, cast(Any, total))
+
+    def order_change_allowed(self, order: Order, request: HttpRequest | None = None) -> bool:
+        """
+        Only offer this provider for payment retries while in test mode.
+
+        `is_allowed()` only covers checkout; retrying an unpaid order or
+        changing its payment method goes through this hook instead, so it
+        needs the same gate or the provider shows up on live events.
+        """
+        if not self._offered_in_test_mode():
+            return False
+        return super().order_change_allowed(order, cast(Any, request))
 
     def _get_credentials(self) -> tuple[str | None, str | None, str | None]:
         """Always use the production space credentials."""
@@ -1462,6 +1536,6 @@ class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
         """Always create a client for the production space."""
         return self._get_client_for_mode("live")
 
-    def _space_id_for_payment(self, payment: OrderPayment) -> str | None:
+    def _mode_for_payment(self, payment: OrderPayment) -> Literal["live", "test"]:
         """Transactions of this provider always live in the production space."""
-        return self.settings.get("space_id")
+        return "live"

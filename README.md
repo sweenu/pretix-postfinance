@@ -78,7 +78,25 @@ Configure the plugin in your pretix settings with:
 - Test mode support: with test credentials configured, events in test mode
   offer both the test space and the production space as payment options, so
   the production space can be verified end-to-end before going live
-  (production space payments are real charges)
+
+### Testing the production space
+
+While an event is in test mode and test credentials are configured, checkout
+offers two PostFinance options:
+
+- **PostFinance (test space)** — uses the test credentials, no real money
+- **PostFinance (production space)** — uses the live credentials
+
+> [!WARNING]
+> Payments through the production space option are **real charges**, even
+> though the order is a test mode order. Refund or void them in your
+> PostFinance dashboard before you disable test mode: pretix offers to delete
+> all test mode orders at that point, and deleting the order does not undo the
+> charge — it only removes your record of it.
+
+Set up webhooks for both spaces (there is a separate "Setup webhooks" button
+next to each set of credentials), otherwise payments in the space without a
+webhook are never confirmed automatically.
 
 ## License
 

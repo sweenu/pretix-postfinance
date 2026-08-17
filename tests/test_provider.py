@@ -1361,3 +1361,135 @@ def test_space_id_for_payment(env):
     order.save()
     assert PostFinancePaymentProvider(event)._space_id_for_payment(payment) == "99999"
     assert PostFinanceProdSpacePaymentProvider(event)._space_id_for_payment(payment) == "12345"
+
+
+@pytest.mark.django_db
+def test_recorded_space_wins_over_the_events_current_test_mode(env):
+    """The space a transaction was created in does not change when the event
+    later leaves test mode, so the recorded space is authoritative."""
+    event, order = env
+    _set_test_credentials(event)
+
+    order.testmode = True
+    order.save()
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"transaction_id": 1, "space_id": 99999}),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    assert prov._space_id_for_payment(payment) == "99999"
+    assert prov._mode_for_payment(payment) == "test"
+
+    # Event goes live; the transaction still lives in the test space
+    event.testmode = False
+    order.testmode = False
+    order.save()
+    prov = PostFinancePaymentProvider(event)
+    assert prov._space_id_for_payment(payment) == "99999"
+    assert prov._mode_for_payment(payment) == "test"
+
+
+@pytest.mark.django_db
+def test_refund_targets_the_space_the_payment_was_created_in(env, monkeypatch, refund_factory):
+    """A refund must be issued in the space holding the transaction, not the
+    one the event's current test mode points at."""
+    event, order = env
+    _set_test_credentials(event)
+
+    captured = {}
+
+    def refund_transaction(self, **kwargs):
+        captured["space_id"] = self.space_id
+        return refund_factory(state="SUCCESSFUL", amount=13.37)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction", refund_transaction
+    )
+
+    order.status = Order.STATUS_PAID
+    order.save()
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps(
+            {
+                "transaction_id": 123456,
+                "space_id": 99999,
+                "state": TransactionState.COMPLETED.value,
+            }
+        ),
+    )
+    refund = order.refunds.create(provider="postfinance", amount=order.total, payment=payment)
+
+    # The event is not in test mode any more, but the transaction is still
+    # in the test space
+    PostFinancePaymentProvider(event).execute_refund(refund)
+
+    assert captured["space_id"] == 99999
+    assert refund.info_data["space_id"] == 99999
+
+
+@pytest.mark.django_db
+def test_transaction_creation_records_its_space(testmode_env, monkeypatch, transaction_factory):
+    event, order = testmode_env
+    _set_test_credentials(event)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        lambda self, **kwargs: transaction_factory(id=555),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: "https://pay.example/555",
+    )
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+
+    transaction_id, url, space_id = PostFinancePaymentProvider(
+        event
+    )._create_payment_transaction(payment)
+
+    assert transaction_id == 555
+    assert space_id == 99999
+
+    # And the production space provider records the live space
+    _, _, prod_space_id = PostFinanceProdSpacePaymentProvider(
+        event
+    )._create_payment_transaction(payment)
+    assert prod_space_id == 12345
+
+
+@pytest.mark.django_db
+def test_prod_provider_not_offered_for_payment_change_outside_testmode(env):
+    """is_allowed() only gates checkout; retrying or changing the payment
+    method of an existing order goes through order_change_allowed()."""
+    event, order = env
+    event.testmode = False
+    _set_test_credentials(event)
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.order_change_allowed(order) is False
+
+
+@pytest.mark.django_db
+def test_prod_provider_not_offered_for_payment_change_without_test_credentials(testmode_env):
+    event, order = testmode_env
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.order_change_allowed(order) is False
+
+
+@pytest.mark.django_db
+def test_prod_provider_offered_for_payment_change_in_testmode(testmode_env, monkeypatch):
+    event, order = testmode_env
+    _set_test_credentials(event)
+
+    monkeypatch.setattr(
+        "pretix.base.payment.BasePaymentProvider.order_change_allowed",
+        lambda self, order, request=None: True,
+    )
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.order_change_allowed(order) is True
