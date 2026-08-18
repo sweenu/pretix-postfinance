@@ -76,6 +76,10 @@ SPACE_ID_KEY = "space_id"
 MAIN_PROVIDER_IDENTIFIER = "postfinance"
 PROD_PROVIDER_IDENTIFIER = "postfinance_prod"
 
+# Setting that opts an event into offering the production space as a second
+# payment option while in test mode. Off unless an organizer turns it on.
+PROD_SPACE_IN_TESTMODE_KEY = "prod_space_in_testmode"
+
 # All provider identifiers used by this plugin. Payments and refunds may be
 # stored under any of these.
 PROVIDER_IDENTIFIERS = (MAIN_PROVIDER_IDENTIFIER, PROD_PROVIDER_IDENTIFIER)
@@ -198,16 +202,32 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return str(name)
         return PostFinancePaymentProvider.verbose_name
 
+    def _prod_space_offered_in_testmode(self) -> bool:
+        """
+        Check whether the production space is offered as a second option.
+
+        This has to be switched on explicitly in the payment settings, which
+        organizers may restrict to administrators. Without test credentials
+        the main provider already uses the production space in test mode, so
+        the second option would be redundant.
+        """
+        return bool(
+            self.event.testmode
+            and self._has_test_credentials()
+            and self.settings.get(PROD_SPACE_IN_TESTMODE_KEY, as_type=bool, default=False)
+        )
+
     @property
     def public_name(self) -> str:
         """
         Return the name shown to customers during checkout.
 
-        While the event is in test mode and test credentials are configured,
-        the name is suffixed with "(test space)" to distinguish it from the
-        production space provider that is also offered in test mode.
+        While the production space is offered alongside this provider, the
+        name is suffixed with "(test space)" to tell the two apart. On its
+        own there is nothing to distinguish it from, so the name is left
+        alone.
         """
-        if self.event.testmode and self._has_test_credentials():
+        if self._prod_space_offered_in_testmode():
             return f"{self._base_public_name} ({_('test space')})"
         return self._base_public_name
 
@@ -368,6 +388,21 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         label=_("Test authentication key"),
                         help_text=_(
                             "Authentication key for test mode. Required if Test space ID is set."
+                        ),
+                        required=False,
+                    ),
+                ),
+                (
+                    PROD_SPACE_IN_TESTMODE_KEY,
+                    forms.BooleanField(
+                        label=_("Offer the production space in test mode"),
+                        help_text=_(
+                            "While the event is in test mode, offer a second payment "
+                            "option that charges through your production space, so it "
+                            "can be verified end-to-end before going live. Payments "
+                            "made through it are real charges and are not undone by "
+                            "deleting the test mode orders. Requires test credentials; "
+                            "without them test mode already uses the production space."
                         ),
                         required=False,
                     ),
@@ -1445,10 +1480,11 @@ class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
     """
     PostFinance provider that always uses the production space.
 
-    Offered during checkout only while the event is in test mode and test
-    credentials are configured, so organizers can verify their production
-    space end-to-end before taking the event live. Payments made through it
-    are real charges in the production space.
+    Offered during checkout only while the event is in test mode, test
+    credentials are configured and the option is switched on in the payment
+    settings, so organizers can verify their production space end-to-end
+    before taking the event live. Payments made through it are real charges
+    in the production space.
 
     It shares all settings (credentials, display name, ...) with the main
     provider and therefore has no settings section of its own.
@@ -1497,20 +1533,11 @@ class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
             )
         )
 
-    def _offered_in_test_mode(self) -> bool:
-        """
-        Check whether this provider may be offered at all.
-
-        Without test credentials the main provider already uses the
-        production space in test mode, so this provider would be redundant.
-        """
-        return bool(self.event.testmode) and self._has_test_credentials()
-
     def is_allowed(self, request: HttpRequest, total: Decimal | None = None) -> bool:
         """
-        Only offer this provider during checkout while the event is in test mode.
+        Only offer this provider during checkout while it is switched on.
         """
-        if not self._offered_in_test_mode():
+        if not self._prod_space_offered_in_testmode():
             return False
         # pretix's own signatures spell these parameters as non-optional even
         # though they accept None, hence the casts.
@@ -1518,13 +1545,13 @@ class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
 
     def order_change_allowed(self, order: Order, request: HttpRequest | None = None) -> bool:
         """
-        Only offer this provider for payment retries while in test mode.
+        Only offer this provider for payment retries while it is switched on.
 
         `is_allowed()` only covers checkout; retrying an unpaid order or
         changing its payment method goes through this hook instead, so it
         needs the same gate or the provider shows up on live events.
         """
-        if not self._offered_in_test_mode():
+        if not self._prod_space_offered_in_testmode():
             return False
         return super().order_change_allowed(order, cast(Any, request))
 

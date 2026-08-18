@@ -1185,6 +1185,10 @@ def _set_test_credentials(event):
     event.settings.set("payment_postfinance_test_auth_key", "test-secret")
 
 
+def _offer_prod_space(event):
+    event.settings.set("payment_postfinance_prod_space_in_testmode", True)
+
+
 @pytest.mark.django_db
 def test_both_providers_registered(env):
     event, _ = env
@@ -1276,6 +1280,7 @@ def test_prod_provider_not_allowed_without_test_credentials(testmode_env, monkey
 def test_prod_provider_allowed_in_testmode_with_test_credentials(testmode_env, monkeypatch):
     event, _ = testmode_env
     _set_test_credentials(event)
+    _offer_prod_space(event)
 
     monkeypatch.setattr(
         "pretix.base.payment.BasePaymentProvider.is_allowed",
@@ -1309,6 +1314,7 @@ def test_prod_provider_public_name_uses_custom_display_name(testmode_env):
 def test_main_provider_public_name_has_test_space_suffix_in_testmode(testmode_env):
     event, _ = testmode_env
     _set_test_credentials(event)
+    _offer_prod_space(event)
 
     prov = PostFinancePaymentProvider(event)
     assert prov.public_name == "PostFinance (test space)"
@@ -1485,6 +1491,7 @@ def test_prod_provider_not_offered_for_payment_change_without_test_credentials(t
 def test_prod_provider_offered_for_payment_change_in_testmode(testmode_env, monkeypatch):
     event, order = testmode_env
     _set_test_credentials(event)
+    _offer_prod_space(event)
 
     monkeypatch.setattr(
         "pretix.base.payment.BasePaymentProvider.order_change_allowed",
@@ -1493,3 +1500,55 @@ def test_prod_provider_offered_for_payment_change_in_testmode(testmode_env, monk
 
     prov = PostFinanceProdSpacePaymentProvider(event)
     assert prov.order_change_allowed(order) is True
+
+
+@pytest.mark.django_db
+def test_prod_provider_not_offered_unless_switched_on(testmode_env, monkeypatch):
+    """The production space option is off unless an organizer switches it on
+    in the payment settings, which access to may be restricted."""
+    event, order = testmode_env
+    _set_test_credentials(event)
+
+    monkeypatch.setattr(
+        "pretix.base.payment.BasePaymentProvider.is_allowed",
+        lambda self, request, total=None: True,
+    )
+    monkeypatch.setattr(
+        "pretix.base.payment.BasePaymentProvider.order_change_allowed",
+        lambda self, order, request=None: True,
+    )
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.is_allowed(request=None) is False
+    assert prov.order_change_allowed(order) is False
+
+    _offer_prod_space(event)
+
+    prov = PostFinanceProdSpacePaymentProvider(event)
+    assert prov.is_allowed(request=None) is True
+    assert prov.order_change_allowed(order) is True
+
+
+@pytest.mark.django_db
+def test_main_provider_public_name_unchanged_unless_prod_space_offered(testmode_env):
+    """Without a second option to tell it apart from, the main provider keeps
+    its plain name."""
+    event, _ = testmode_env
+    _set_test_credentials(event)
+
+    assert PostFinancePaymentProvider(event).public_name == "PostFinance"
+
+    _offer_prod_space(event)
+    assert PostFinancePaymentProvider(event).public_name == "PostFinance (test space)"
+
+
+@pytest.mark.django_db
+def test_prod_space_option_is_in_the_main_providers_settings(env):
+    """The switch belongs to the main provider's settings section; the
+    production space provider has none of its own."""
+    event, _ = env
+
+    fields = PostFinancePaymentProvider(event).settings_form_fields
+    assert "prod_space_in_testmode" in fields
+    assert fields["prod_space_in_testmode"].required is False
+    assert PostFinanceProdSpacePaymentProvider(event).settings_form_fields == {}

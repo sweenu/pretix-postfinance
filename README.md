@@ -75,17 +75,23 @@ Configure the plugin in your pretix settings with:
 - Payment processing via PostFinance Checkout
 - Full and partial refund support
 - Webhook handling for payment and refund notifications
-- Test mode support: with test credentials configured, events in test mode
-  offer both the test space and the production space as payment options, so
-  the production space can be verified end-to-end before going live
+- Test mode support, including an opt-in option to offer the production space
+  alongside the test space while in test mode, so it can be verified
+  end-to-end before going live
 
 ### Testing the production space
 
-While an event is in test mode and test credentials are configured, checkout
-offers two PostFinance options:
+Switching on **Offer the production space in test mode** in the payment
+settings makes checkout offer two PostFinance options while the event is in
+test mode:
 
 - **PostFinance (test space)** — uses the test credentials, no real money
 - **PostFinance (production space)** — uses the live credentials
+
+The option is **off by default** and requires test credentials. Because it
+lives in the payment settings, only the people who can reach those settings
+can expose the production space to buyers in test mode. Leave it off unless
+you are actively running that verification, and switch it back off afterwards.
 
 > [!WARNING]
 > Payments through the production space option are **real charges**, even
