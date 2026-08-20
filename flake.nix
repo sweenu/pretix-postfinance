@@ -30,7 +30,7 @@
         {
           default = pyPkgs.buildPythonPackage {
             pname = "pretix-postfinance";
-            version = "1.7.0";
+            version = "1.7.1";
             src = self;
             format = "pyproject";
 
