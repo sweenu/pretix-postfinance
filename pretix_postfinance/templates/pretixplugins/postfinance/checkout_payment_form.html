@@ -1,6 +1,9 @@
 {% load bootstrap3 %}
-{# The default payment form template uses bootstrap's horizontal layout, which #}
-{# gives every field an empty col-md-3 label column. Our only field is a       #}
-{# checkbox, whose label sits inside the input, so that column would indent it #}
-{# into the middle of the panel. The default layout keeps it left aligned.     #}
-{% bootstrap_form form %}
+{# pretix renders the payment panel body as .form-horizontal, where bootstrap  #}
+{# turns every .form-group into a row with -15px side margins. Our only field  #}
+{# is a checkbox, which carries its label inside the input, so pretix's own    #}
+{# form template indents it by an empty col-md-3 label column, while a plain   #}
+{# .form-group leaves it hanging 15px left of the panel's padding. Putting the #}
+{# field in a full width column restores the gutter the row removed, lining it #}
+{# up with the rest of the panel body at every breakpoint.                     #}
+{% bootstrap_form form form_group_class="form-group col-md-12" %}

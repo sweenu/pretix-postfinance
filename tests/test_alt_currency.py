@@ -121,16 +121,21 @@ def test_payment_form_render_shows_converted_amount(provider, rf):
 
 
 @pytest.mark.django_db
-def test_payment_form_checkbox_is_left_aligned(provider, rf):
-    """pretix's default form template uses bootstrap's horizontal layout,
-    which indents a lone checkbox by an empty col-md-3 label column."""
+def test_payment_form_checkbox_is_aligned_with_the_panel(provider, rf):
+    """The checkbox has to line up with the rest of the payment panel.
+
+    pretix renders the panel body as .form-horizontal, so the field's
+    .form-group is a row with -15px side margins. A full width column puts
+    that gutter back; an empty col-md-3 label column (pretix's own template)
+    would instead indent the checkbox into the middle of the panel.
+    """
     req = rf.get("/")
     req.event = provider.event
     req.session = {}
 
     html = provider.payment_form_render(req, Decimal("13.37"))
 
-    assert "form-horizontal" not in html
+    assert "form-group col-md-12" in html
     assert "col-md-3" not in html
     assert "col-md-9" not in html
     assert 'class="checkbox"' in html
