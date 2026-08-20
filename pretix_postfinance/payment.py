@@ -110,6 +110,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     verbose_name = "PostFinance"
     abort_pending_allowed = False
     execute_payment_needs_user = True
+    payment_form_template_name = "pretixplugins/postfinance/checkout_payment_form.html"
 
     @property
     def test_mode_message(self) -> str:

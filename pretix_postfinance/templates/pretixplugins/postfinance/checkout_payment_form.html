@@ -1,0 +1,6 @@
+{% load bootstrap3 %}
+{# The default payment form template uses bootstrap's horizontal layout, which #}
+{# gives every field an empty col-md-3 label column. Our only field is a       #}
+{# checkbox, whose label sits inside the input, so that column would indent it #}
+{# into the middle of the panel. The default layout keeps it left aligned.     #}
+{% bootstrap_form form %}

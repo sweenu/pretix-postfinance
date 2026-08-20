@@ -121,6 +121,22 @@ def test_payment_form_render_shows_converted_amount(provider, rf):
 
 
 @pytest.mark.django_db
+def test_payment_form_checkbox_is_left_aligned(provider, rf):
+    """pretix's default form template uses bootstrap's horizontal layout,
+    which indents a lone checkbox by an empty col-md-3 label column."""
+    req = rf.get("/")
+    req.event = provider.event
+    req.session = {}
+
+    html = provider.payment_form_render(req, Decimal("13.37"))
+
+    assert "form-horizontal" not in html
+    assert "col-md-3" not in html
+    assert "col-md-9" not in html
+    assert 'class="checkbox"' in html
+
+
+@pytest.mark.django_db
 def test_whole_rate_is_not_rendered_in_scientific_notation(alt_event, rf):
     # Decimal("160").normalize() is 1.6E+2, which must not reach customers.
     alt_event.settings.set("payment_postfinance_alt_currency", "JPY")
