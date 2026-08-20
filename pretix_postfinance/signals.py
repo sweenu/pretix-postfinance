@@ -48,13 +48,16 @@ class PostFinanceRefundFailedLogEntryType(OrderLogEntryType):
 
 
 @receiver(register_payment_providers, dispatch_uid="payment_postfinance")
-def register_payment_provider(sender: Any, **kwargs: Any) -> type[Any]:
+def register_payment_provider(sender: Any, **kwargs: Any) -> list[type[Any]]:
     """
-    Register the PostFinance payment provider with pretix.
-    """
-    from .payment import PostFinancePaymentProvider
+    Register the PostFinance payment providers with pretix.
 
-    return PostFinancePaymentProvider
+    The production space provider is only offered during checkout while the
+    event is in test mode, so the production space can be tested end-to-end.
+    """
+    from .payment import PostFinancePaymentProvider, PostFinanceProdSpacePaymentProvider
+
+    return [PostFinancePaymentProvider, PostFinanceProdSpacePaymentProvider]
 
 
 @receiver(html_head, dispatch_uid="postfinance_control_html_head")

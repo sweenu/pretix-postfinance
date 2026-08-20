@@ -47,6 +47,12 @@ from postfinancecheckout.service import (
 
 logger = logging.getLogger(__name__)
 
+# PostFinance webhook entity type IDs (fixed IDs in PostFinance's system).
+# Webhook payloads carry the type of the entity they are about in
+# `listenerEntityId`. See https://checkout.postfinance.ch/doc/api/webhook-entity/list
+TRANSACTION_ENTITY_ID = 1472041829003
+REFUND_ENTITY_ID = 1472041839405
+
 
 def _get_timeout() -> int:
     """
@@ -635,11 +641,6 @@ class PostFinanceClient:
         Raises:
             PostFinanceError: If any API request fails.
         """
-        # PostFinance entity IDs (these are fixed IDs in PostFinance's system).
-        # See https://checkout.postfinance.ch/doc/api/webhook-entity/list
-        TRANSACTION_ENTITY_ID = 1472041829003
-        REFUND_ENTITY_ID = 1472041839405
-
         # Transaction states we care about (all major state changes)
         TRANSACTION_STATES = [
             TransactionState.AUTHORIZED.value,
