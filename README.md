@@ -121,10 +121,12 @@ rate fluctuations.
 
 Customers then see a "Pay in CHF" checkbox with the converted amount when
 they select PostFinance during checkout. The rate in effect when a payment is
-started is stored on the payment and is also used to convert partial refunds;
-full refunds are refunded by PostFinance at the exact remaining transaction
-amount. The charged amount and rate are shown to the customer during checkout
-and to organizers in the order's payment details.
+started is stored on the payment, together with the amount actually charged.
+Partial refunds are converted with that stored rate; a refund of the payment's
+full remaining amount returns what is left of the stored charge instead, so
+conversion rounding never leaves a cent behind or overshoots the transaction.
+The charged amount and rate are shown to the customer during checkout and to
+organizers in the order's payment details.
 
 ## License
 

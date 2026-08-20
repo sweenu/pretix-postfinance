@@ -9,7 +9,6 @@ from django import forms
 from django.conf import settings as django_settings
 from django.contrib import messages
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.db.models import Sum
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
@@ -1518,52 +1517,101 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         return self.payment_refund_supported(payment)
 
-    def _refund_transaction_amount(self, refund: OrderRefund) -> Decimal | None:
+    @staticmethod
+    def _unknown_rate_exception(charged_currency: str) -> PaymentException:
+        return PaymentException(
+            str(
+                _(
+                    "The exchange rate used for this payment is unknown, so the refund "
+                    "amount cannot be converted to {currency}. Please refund manually "
+                    "in the PostFinance dashboard."
+                ).format(currency=charged_currency)
+            )
+        )
+
+    def _charged_amount_of(
+        self, refund: OrderRefund, rate: Decimal | None, charged_currency: str
+    ) -> Decimal:
+        """
+        Return how much of the transaction's charge a refund draws down.
+
+        Refunds this plugin sent store the amount PostFinance booked, which
+        is authoritative. Refunds recorded without one — externally created
+        in the dashboard, or not yet sent — are converted at the payment's
+        rate, the same way sending them would have.
+        """
+        booked = (refund.info_data or {}).get("amount")
+        if booked is not None:
+            return Decimal(str(booked))
+        if rate is None:
+            raise self._unknown_rate_exception(charged_currency)
+        return self._convert(cast("Decimal", refund.amount), rate)
+
+    def _refund_transaction_amount(self, refund: OrderRefund) -> Decimal:
         """
         Return the refund amount in the transaction's charge currency.
 
         Payments charged in the event currency refund their amount as-is.
         For payments charged in the alternative currency, partial refunds
-        are converted with the rate snapshotted on the payment; refunds
-        that return the payment's full remaining amount are sent without
-        an explicit amount (``None``) so PostFinance refunds the exact
-        remaining charge, immune to conversion rounding.
+        are converted with the rate snapshotted on the payment; a refund
+        that returns the payment's full remaining amount instead draws down
+        what is left of the charge recorded at payment time, so conversion
+        rounding can neither leave a cent behind nor overshoot the
+        transaction. PostFinance rejects a refund carrying neither an amount
+        nor line item reductions, so an amount is always sent.
         """
         payment = refund.payment
         info = payment.info_data or {}
-        charged_currency = info.get("charged_currency")
+        charged_currency = str(info.get("charged_currency") or "")
         if not charged_currency or charged_currency == self.event.currency:
             return cast("Decimal", refund.amount)
+
+        rate_raw = info.get("fx_rate")
+        rate = Decimal(str(rate_raw)) if rate_raw else None
 
         # Only refunds drawn on the PostFinance transaction reduce what is
         # left to refund there. A refund settled by other means (manual bank
         # transfer, gift card, offsetting) leaves the transaction untouched,
         # so counting it would make the next refund look like the remainder
         # and refund the whole outstanding charge.
-        already_refunded = payment.refunds.exclude(pk=refund.pk).filter(
-            provider__in=PROVIDER_IDENTIFIERS,
-            state__in=(
-                OrderRefund.REFUND_STATE_DONE,
-                OrderRefund.REFUND_STATE_TRANSIT,
-                OrderRefund.REFUND_STATE_CREATED,
-                OrderRefund.REFUND_STATE_EXTERNAL,
-            ),
-        ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-        if refund.amount >= payment.amount - already_refunded:
-            return None
-
-        rate_raw = info.get("fx_rate")
-        if not rate_raw:
-            raise PaymentException(
-                str(
-                    _(
-                        "The exchange rate used for this payment is unknown, so the refund "
-                        "amount cannot be converted to {currency}. Please refund manually "
-                        "in the PostFinance dashboard."
-                    ).format(currency=charged_currency)
-                )
+        siblings = list(
+            payment.refunds.exclude(pk=refund.pk).filter(
+                provider__in=PROVIDER_IDENTIFIERS,
+                state__in=(
+                    OrderRefund.REFUND_STATE_DONE,
+                    OrderRefund.REFUND_STATE_TRANSIT,
+                    OrderRefund.REFUND_STATE_CREATED,
+                    OrderRefund.REFUND_STATE_EXTERNAL,
+                ),
             )
-        return self._convert(cast("Decimal", refund.amount), Decimal(str(rate_raw)))
+        )
+        already_refunded = sum(
+            (cast("Decimal", sibling.amount) for sibling in siblings), Decimal("0.00")
+        )
+
+        charged_amount_raw = info.get("charged_amount")
+        if charged_amount_raw and refund.amount >= payment.amount - already_refunded:
+            remaining = Decimal(str(charged_amount_raw)) - sum(
+                (
+                    self._charged_amount_of(sibling, rate, charged_currency)
+                    for sibling in siblings
+                ),
+                Decimal("0.00"),
+            )
+            if remaining <= 0:
+                raise PaymentException(
+                    str(
+                        _(
+                            "This payment has already been fully refunded in {currency}. "
+                            "Please check the PostFinance dashboard."
+                        ).format(currency=charged_currency)
+                    )
+                )
+            return remaining
+
+        if rate is None:
+            raise self._unknown_rate_exception(charged_currency)
+        return self._convert(cast("Decimal", refund.amount), rate)
 
     def execute_refund(self, refund: OrderRefund, user: str = "system") -> None:
         """

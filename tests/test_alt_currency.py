@@ -372,7 +372,7 @@ def test_refund_of_event_currency_payment_unchanged(
 
 
 @pytest.mark.django_db
-def test_full_refund_of_alt_currency_payment_sends_no_amount(
+def test_full_refund_of_alt_currency_payment_sends_charged_amount(
     alt_event, order, monkeypatch, refund_factory
 ):
     captured = {}
@@ -388,9 +388,9 @@ def test_full_refund_of_alt_currency_payment_sends_no_amount(
 
     provider.execute_refund(refund)
 
-    # Full refunds pass no amount so PostFinance refunds the exact
-    # remaining CHF, immune to conversion rounding.
-    assert captured["amount"] is None
+    # PostFinance rejects a refund with neither an amount nor reductions,
+    # so full refunds send the exact charge recorded at payment time.
+    assert captured["amount"] == Decimal("12.43")
     refund.refresh_from_db()
     assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
 
@@ -416,7 +416,7 @@ def test_partial_refund_of_alt_currency_payment_is_converted(
 
 
 @pytest.mark.django_db
-def test_final_partial_refund_of_remainder_is_full_refund(alt_event, order):
+def test_final_partial_refund_draws_down_the_remaining_charge(alt_event, order):
     provider = PostFinancePaymentProvider(alt_event)
     payment = _paid_payment(order)
     order.refunds.create(
@@ -424,6 +424,7 @@ def test_final_partial_refund_of_remainder_is_full_refund(alt_event, order):
         amount=Decimal("5.00"),
         payment=payment,
         state=OrderRefund.REFUND_STATE_DONE,
+        info=json.dumps({"refund_id": 1, "amount": 4.65}),
     )
     remainder = order.refunds.create(
         provider="postfinance",
@@ -431,7 +432,70 @@ def test_final_partial_refund_of_remainder_is_full_refund(alt_event, order):
         payment=payment,
     )
 
-    assert provider._refund_transaction_amount(remainder) is None
+    # 12.43 CHF charged minus the 4.65 CHF PostFinance already refunded
+    assert provider._refund_transaction_amount(remainder) == Decimal("7.78")
+
+
+@pytest.mark.django_db
+def test_remainder_ignores_rounding_drift_of_the_converted_parts(alt_event, order):
+    """The remainder is what is left of the charge, not a re-conversion.
+
+    10.00 EUR at 0.925 is charged as 9.25 CHF, but each 5.00 EUR half
+    converts to 4.63 CHF (4.6250 rounded half up) — 9.26 CHF together, a
+    cent more than was ever charged. The second refund has to return the
+    4.62 CHF actually left, or PostFinance rejects it.
+    """
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=Decimal("10.00"),
+        state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+        info=json.dumps(
+            {
+                "transaction_id": 123456,
+                "state": TransactionState.COMPLETED.value,
+                "fx_rate": "0.925",
+                "fx_base_currency": "EUR",
+                "charged_currency": "CHF",
+                "charged_amount": "9.25",
+            }
+        ),
+    )
+    order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+        info=json.dumps({"refund_id": 1, "amount": 4.63}),
+    )
+    remainder = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(remainder) == Decimal("4.62")
+
+
+@pytest.mark.django_db
+def test_refund_of_fully_refunded_charge_raises(alt_event, order):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+        info=json.dumps({"refund_id": 1, "amount": 12.43}),
+    )
+    extra = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("1.00"),
+        payment=payment,
+    )
+
+    with pytest.raises(PaymentException):
+        provider._refund_transaction_amount(extra)
 
 
 @pytest.mark.django_db
@@ -465,6 +529,7 @@ def test_refund_of_production_space_payment_counts_toward_remainder(alt_event, o
         amount=Decimal("5.00"),
         payment=payment,
         state=OrderRefund.REFUND_STATE_DONE,
+        info=json.dumps({"refund_id": 1, "amount": 4.65}),
     )
     remainder = order.refunds.create(
         provider="postfinance",
@@ -472,13 +537,14 @@ def test_refund_of_production_space_payment_counts_toward_remainder(alt_event, o
         payment=payment,
     )
 
-    assert provider._refund_transaction_amount(remainder) is None
+    assert provider._refund_transaction_amount(remainder) == Decimal("7.78")
 
 
 @pytest.mark.django_db
 def test_externally_recorded_postfinance_refund_counts_toward_remainder(alt_event, order):
     # Refunded in the PostFinance dashboard and recorded in pretix: the
-    # transaction's remaining charge is reduced just the same.
+    # transaction's remaining charge is reduced just the same. No CHF amount
+    # was recorded for it, so it is converted the way sending it would have.
     provider = PostFinancePaymentProvider(alt_event)
     payment = _paid_payment(order)
     order.refunds.create(
@@ -493,7 +559,7 @@ def test_externally_recorded_postfinance_refund_counts_toward_remainder(alt_even
         payment=payment,
     )
 
-    assert provider._refund_transaction_amount(remainder) is None
+    assert provider._refund_transaction_amount(remainder) == Decimal("7.78")
 
 
 @pytest.mark.django_db
@@ -508,6 +574,20 @@ def test_partial_refund_without_stored_rate_raises(alt_event, order):
 
     with pytest.raises(PaymentException):
         provider._refund_transaction_amount(refund)
+
+
+@pytest.mark.django_db
+def test_full_refund_without_stored_rate_uses_charged_amount(alt_event, order):
+    # A full refund returns the recorded charge, so it needs no rate.
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order, fx_rate=None)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(refund) == Decimal("12.43")
 
 
 @pytest.mark.django_db
