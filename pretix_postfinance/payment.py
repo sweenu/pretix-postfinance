@@ -739,7 +739,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return None
         try:
             rate = self.settings.get("alt_currency_rate", as_type=Decimal)
-        except Exception:
+        except (ArithmeticError, TypeError, ValueError):
+            # A rate that cannot be parsed as a decimal disables the feature
+            # rather than breaking checkout, but it is a misconfiguration the
+            # organizer needs to hear about.
+            logger.warning(
+                "Ignoring unparseable PostFinance exchange rate %r for event %s",
+                self.settings.get("alt_currency_rate"),
+                self.event.slug,
+            )
             return None
         if not rate or rate <= 0:
             return None
@@ -747,6 +755,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def _convert(self, amount: Decimal, rate: Decimal) -> Decimal:
         return (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    @staticmethod
+    def _format_rate(rate: Decimal) -> str:
+        """
+        Format an exchange rate for display without scientific notation.
+
+        ``Decimal.normalize()`` strips trailing zeros, but turns whole rates
+        like 160 into ``1.6E+2``, so the plain fixed-point form is used.
+        """
+        return format(rate.normalize(), "f")
 
     @property
     def _session_pay_alt_key(self) -> str:
@@ -778,7 +796,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 alt_amount=money_filter(self._convert(total, rate), currency),
                 base_amount=money_filter(total, self.event.currency),
                 base_currency=self.event.currency,
-                rate=rate.normalize(),
+                rate=self._format_rate(rate),
                 currency=currency,
             )
         template = get_template(self.payment_form_template_name)
@@ -1226,7 +1244,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 ).format(
                     currency=currency,
                     base_currency=self.event.currency,
-                    rate=rate.normalize(),
+                    rate=self._format_rate(rate),
                 ),
             )
         return html
@@ -1516,11 +1534,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         if not charged_currency or charged_currency == self.event.currency:
             return cast("Decimal", refund.amount)
 
+        # Only refunds drawn on the PostFinance transaction reduce what is
+        # left to refund there. A refund settled by other means (manual bank
+        # transfer, gift card, offsetting) leaves the transaction untouched,
+        # so counting it would make the next refund look like the remainder
+        # and refund the whole outstanding charge.
         already_refunded = payment.refunds.exclude(pk=refund.pk).filter(
+            provider__in=PROVIDER_IDENTIFIERS,
             state__in=(
                 OrderRefund.REFUND_STATE_DONE,
                 OrderRefund.REFUND_STATE_TRANSIT,
                 OrderRefund.REFUND_STATE_CREATED,
+                OrderRefund.REFUND_STATE_EXTERNAL,
             ),
         ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
         if refund.amount >= payment.amount - already_refunded:

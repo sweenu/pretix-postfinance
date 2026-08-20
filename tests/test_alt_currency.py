@@ -55,6 +55,15 @@ def test_alt_currency_config_none_without_rate(event):
 
 
 @pytest.mark.django_db
+def test_alt_currency_config_none_with_unparseable_rate(event, caplog):
+    event.settings.set("payment_postfinance_alt_currency", "CHF")
+    event.settings.set("payment_postfinance_alt_currency_rate", "not-a-number")
+
+    assert PostFinancePaymentProvider(event).alt_currency_config is None
+    assert "unparseable PostFinance exchange rate" in caplog.text
+
+
+@pytest.mark.django_db
 def test_settings_form_has_alt_currency_fields(alt_event, monkeypatch):
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinancePaymentProvider._get_payment_method_choices",
@@ -109,6 +118,25 @@ def test_payment_form_render_shows_converted_amount(provider, rf):
     assert "Pay in CHF" in html
     assert "12.43" in html
     assert "0.93" in html
+
+
+@pytest.mark.django_db
+def test_whole_rate_is_not_rendered_in_scientific_notation(alt_event, rf):
+    # Decimal("160").normalize() is 1.6E+2, which must not reach customers.
+    alt_event.settings.set("payment_postfinance_alt_currency", "JPY")
+    alt_event.settings.set("payment_postfinance_alt_currency_rate", "160.000000")
+    provider = PostFinancePaymentProvider(alt_event)
+    req = rf.get("/")
+    req.event = alt_event
+    req.session = {PAY_ALT_SESSION_KEY: True}
+
+    form_html = provider.payment_form_render(req, Decimal("13.37"))
+    confirm_html = provider.checkout_confirm_render(req)
+
+    assert "1 EUR = 160 JPY" in form_html
+    assert "1 EUR = 160 JPY" in confirm_html
+    assert "E+" not in form_html
+    assert "E+" not in confirm_html
 
 
 @pytest.mark.django_db
@@ -375,6 +403,68 @@ def test_final_partial_refund_of_remainder_is_full_refund(alt_event, order):
         amount=Decimal("5.00"),
         payment=payment,
         state=OrderRefund.REFUND_STATE_DONE,
+    )
+    remainder = order.refunds.create(
+        provider="postfinance",
+        amount=order.total - Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(remainder) is None
+
+
+@pytest.mark.django_db
+def test_refund_settled_by_other_means_is_not_a_postfinance_remainder(alt_event, order):
+    # A manual refund does not draw on the PostFinance transaction, so the
+    # PostFinance refund that follows is still a partial one and must be
+    # converted instead of refunding the whole outstanding charge.
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    order.refunds.create(
+        provider="manual",
+        amount=order.total - Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+    )
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(refund) == Decimal("4.65")
+
+
+@pytest.mark.django_db
+def test_refund_of_production_space_payment_counts_toward_remainder(alt_event, order):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    order.refunds.create(
+        provider="postfinance_prod",
+        amount=Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+    )
+    remainder = order.refunds.create(
+        provider="postfinance",
+        amount=order.total - Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(remainder) is None
+
+
+@pytest.mark.django_db
+def test_externally_recorded_postfinance_refund_counts_toward_remainder(alt_event, order):
+    # Refunded in the PostFinance dashboard and recorded in pretix: the
+    # transaction's remaining charge is reduced just the same.
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_EXTERNAL,
     )
     remainder = order.refunds.create(
         provider="postfinance",
