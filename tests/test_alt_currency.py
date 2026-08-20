@@ -1,0 +1,549 @@
+from __future__ import annotations
+
+import json
+from decimal import Decimal
+from unittest.mock import MagicMock
+
+import pytest
+from django.core.exceptions import ValidationError
+from postfinancecheckout.models import TransactionState
+from pretix.base.models import Order, OrderPayment, OrderRefund
+from pretix.base.payment import PaymentException
+
+from pretix_postfinance.payment import PostFinancePaymentProvider
+from pretix_postfinance.views import _process_transaction_webhook
+
+PAY_ALT_SESSION_KEY = "payment_postfinance_pay_alt"
+
+
+@pytest.fixture
+def alt_event(event):
+    event.settings.set("payment_postfinance_alt_currency", "CHF")
+    event.settings.set("payment_postfinance_alt_currency_rate", "0.93")
+    return event
+
+
+@pytest.fixture
+def provider(alt_event):
+    return PostFinancePaymentProvider(alt_event)
+
+
+# Configuration
+
+
+@pytest.mark.django_db
+def test_alt_currency_config_parsed(provider):
+    assert provider.alt_currency_config == ("CHF", Decimal("0.93"))
+
+
+@pytest.mark.django_db
+def test_alt_currency_config_none_without_settings(event):
+    assert PostFinancePaymentProvider(event).alt_currency_config is None
+
+
+@pytest.mark.django_db
+def test_alt_currency_config_none_when_same_as_event_currency(alt_event):
+    alt_event.currency = "CHF"
+    alt_event.save()
+    assert PostFinancePaymentProvider(alt_event).alt_currency_config is None
+
+
+@pytest.mark.django_db
+def test_alt_currency_config_none_without_rate(event):
+    event.settings.set("payment_postfinance_alt_currency", "CHF")
+    assert PostFinancePaymentProvider(event).alt_currency_config is None
+
+
+@pytest.mark.django_db
+def test_alt_currency_config_none_with_unparseable_rate(event, caplog):
+    event.settings.set("payment_postfinance_alt_currency", "CHF")
+    event.settings.set("payment_postfinance_alt_currency_rate", "not-a-number")
+
+    assert PostFinancePaymentProvider(event).alt_currency_config is None
+    assert "unparseable PostFinance exchange rate" in caplog.text
+
+
+@pytest.mark.django_db
+def test_settings_form_has_alt_currency_fields(alt_event, monkeypatch):
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinancePaymentProvider._get_payment_method_choices",
+        lambda self: [],
+    )
+    fields = PostFinancePaymentProvider(alt_event).settings_form_fields
+    assert "alt_currency" in fields
+    assert "alt_currency_rate" in fields
+    # The event's own currency is not offered as an alternative
+    assert "EUR" not in dict(fields["alt_currency"].choices)
+    assert "CHF" in dict(fields["alt_currency"].choices)
+
+
+@pytest.mark.django_db
+def test_settings_form_clean_requires_rate_with_currency(provider):
+    with pytest.raises(ValidationError):
+        provider.settings_form_clean({"alt_currency": "CHF", "alt_currency_rate": None})
+
+    cleaned = {"alt_currency": "CHF", "alt_currency_rate": Decimal("0.93")}
+    assert provider.settings_form_clean(dict(cleaned)) == cleaned
+
+
+@pytest.mark.django_db
+def test_conversion_rounds_half_up(provider):
+    assert provider._convert(Decimal("13.37"), Decimal("0.93")) == Decimal("12.43")
+    assert provider._convert(Decimal("10.00"), Decimal("0.955")) == Decimal("9.55")
+    # 1.005 rounds up, not to even
+    assert provider._convert(Decimal("1.00"), Decimal("1.005")) == Decimal("1.01")
+
+
+# Checkout form
+
+
+@pytest.mark.django_db
+def test_payment_form_has_checkbox_when_configured(provider):
+    assert "pay_alt" in provider.payment_form_fields
+
+
+@pytest.mark.django_db
+def test_payment_form_has_no_checkbox_without_config(event):
+    assert "pay_alt" not in PostFinancePaymentProvider(event).payment_form_fields
+
+
+@pytest.mark.django_db
+def test_payment_form_render_shows_converted_amount(provider, rf):
+    req = rf.get("/")
+    req.event = provider.event
+    req.session = {}
+
+    html = provider.payment_form_render(req, Decimal("13.37"))
+
+    assert "Pay in CHF" in html
+    assert "12.43" in html
+    assert "0.93" in html
+
+
+@pytest.mark.django_db
+def test_whole_rate_is_not_rendered_in_scientific_notation(alt_event, rf):
+    # Decimal("160").normalize() is 1.6E+2, which must not reach customers.
+    alt_event.settings.set("payment_postfinance_alt_currency", "JPY")
+    alt_event.settings.set("payment_postfinance_alt_currency_rate", "160.000000")
+    provider = PostFinancePaymentProvider(alt_event)
+    req = rf.get("/")
+    req.event = alt_event
+    req.session = {PAY_ALT_SESSION_KEY: True}
+
+    form_html = provider.payment_form_render(req, Decimal("13.37"))
+    confirm_html = provider.checkout_confirm_render(req)
+
+    assert "1 EUR = 160 JPY" in form_html
+    assert "1 EUR = 160 JPY" in confirm_html
+    assert "E+" not in form_html
+    assert "E+" not in confirm_html
+
+
+@pytest.mark.django_db
+def test_checkout_confirm_render_mentions_rate_when_opted_in(provider, rf):
+    req = rf.get("/")
+    req.event = provider.event
+
+    req.session = {PAY_ALT_SESSION_KEY: True}
+    assert "0.93" in provider.checkout_confirm_render(req)
+
+    req.session = {}
+    assert "0.93" not in provider.checkout_confirm_render(req)
+
+
+# Transaction creation
+
+
+def _mock_transaction_creation(monkeypatch, captured):
+    def fake_create_transaction(self, **kwargs):
+        captured.update(kwargs)
+        transaction = MagicMock()
+        transaction.id = 999888
+        return transaction
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        fake_create_transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: "https://checkout.postfinance.ch/pay/999888",
+    )
+
+
+@pytest.mark.django_db
+def test_opted_in_payment_charged_in_alt_currency(alt_event, order, rf, monkeypatch):
+    captured = {}
+    _mock_transaction_creation(monkeypatch, captured)
+
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,  # 13.37 EUR
+        state=OrderPayment.PAYMENT_STATE_CREATED,
+    )
+    req = rf.post("/")
+    req.session = {PAY_ALT_SESSION_KEY: True}
+
+    result = provider.execute_payment(req, payment)
+
+    assert result == "https://checkout.postfinance.ch/pay/999888"
+    assert captured["currency"] == "CHF"
+    line_items = captured["line_items"]
+    assert len(line_items) == 1
+    assert line_items[0].amount_including_tax == pytest.approx(12.43)  # 13.37 * 0.93
+
+    payment.refresh_from_db()
+    assert payment.info_data["pending_transaction_id"] == 999888
+    assert payment.info_data["fx_rate"] == "0.93"
+    assert payment.info_data["fx_base_currency"] == "EUR"
+    assert payment.info_data["charged_currency"] == "CHF"
+    assert payment.info_data["charged_amount"] == "12.43"
+
+
+@pytest.mark.django_db
+def test_opted_out_payment_charged_in_event_currency(alt_event, order, rf, monkeypatch):
+    captured = {}
+    _mock_transaction_creation(monkeypatch, captured)
+
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        state=OrderPayment.PAYMENT_STATE_CREATED,
+    )
+    req = rf.post("/")
+    req.session = {}
+
+    provider.execute_payment(req, payment)
+
+    assert captured["currency"] == "EUR"
+    payment.refresh_from_db()
+    assert "fx_rate" not in payment.info_data
+    assert "charged_currency" not in payment.info_data
+
+
+@pytest.mark.django_db
+def test_retry_without_checkbox_clears_stale_fx_snapshot(alt_event, order, rf, monkeypatch):
+    captured = {}
+    _mock_transaction_creation(monkeypatch, captured)
+
+    provider = PostFinancePaymentProvider(alt_event)
+    # Payment from an earlier attempt where the customer had opted into CHF
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        state=OrderPayment.PAYMENT_STATE_CREATED,
+        info=json.dumps(
+            {
+                "fx_rate": "0.93",
+                "fx_base_currency": "EUR",
+                "charged_currency": "CHF",
+                "charged_amount": "12.43",
+            }
+        ),
+    )
+    req = rf.post("/")
+    req.session = {}
+
+    provider.execute_payment(req, payment)
+
+    assert captured["currency"] == "EUR"
+    payment.refresh_from_db()
+    assert "fx_rate" not in payment.info_data
+    assert "charged_currency" not in payment.info_data
+
+
+@pytest.mark.django_db
+def test_execute_payment_confirm_preserves_fx_snapshot(
+    alt_event, order, rf, monkeypatch, transaction_factory
+):
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: transaction_factory(state=TransactionState.FULFILL),
+    )
+
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        state=OrderPayment.PAYMENT_STATE_CREATED,
+        info=json.dumps(
+            {
+                "pending_transaction_id": 123456,
+                "fx_rate": "0.93",
+                "fx_base_currency": "EUR",
+                "charged_currency": "CHF",
+                "charged_amount": "12.43",
+            }
+        ),
+    )
+    req = rf.post("/")
+    req.session = {}
+
+    provider.execute_payment(req, payment)
+
+    order.refresh_from_db()
+    payment.refresh_from_db()
+    assert order.status == Order.STATUS_PAID
+    assert payment.info_data["transaction_id"] == 123456
+    assert "pending_transaction_id" not in payment.info_data
+    # The FX snapshot must survive confirmation for later refunds
+    assert payment.info_data["fx_rate"] == "0.93"
+    assert payment.info_data["charged_amount"] == "12.43"
+
+
+# Refunds
+
+
+def _paid_payment(order, fx=True, fx_rate="0.93"):
+    info = {
+        "transaction_id": 123456,
+        "state": TransactionState.COMPLETED.value,
+    }
+    if fx:
+        info.update(
+            {
+                "fx_base_currency": "EUR",
+                "charged_currency": "CHF",
+                "charged_amount": "12.43",
+            }
+        )
+        if fx_rate is not None:
+            info["fx_rate"] = fx_rate
+    return order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+        info=json.dumps(info),
+    )
+
+
+def _mock_refund(monkeypatch, captured, refund_factory):
+    def fake_refund_transaction(self, **kwargs):
+        captured.update(kwargs)
+        return refund_factory()
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction",
+        fake_refund_transaction,
+    )
+
+
+@pytest.mark.django_db
+def test_refund_of_event_currency_payment_unchanged(
+    alt_event, order, monkeypatch, refund_factory
+):
+    captured = {}
+    _mock_refund(monkeypatch, captured, refund_factory)
+
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order, fx=False)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    provider.execute_refund(refund)
+
+    assert captured["amount"] == Decimal("5.00")
+
+
+@pytest.mark.django_db
+def test_full_refund_of_alt_currency_payment_sends_no_amount(
+    alt_event, order, monkeypatch, refund_factory
+):
+    captured = {}
+    _mock_refund(monkeypatch, captured, refund_factory)
+
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+    )
+
+    provider.execute_refund(refund)
+
+    # Full refunds pass no amount so PostFinance refunds the exact
+    # remaining CHF, immune to conversion rounding.
+    assert captured["amount"] is None
+    refund.refresh_from_db()
+    assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
+
+
+@pytest.mark.django_db
+def test_partial_refund_of_alt_currency_payment_is_converted(
+    alt_event, order, monkeypatch, refund_factory
+):
+    captured = {}
+    _mock_refund(monkeypatch, captured, refund_factory)
+
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    provider.execute_refund(refund)
+
+    assert captured["amount"] == Decimal("4.65")  # 5.00 EUR * 0.93
+
+
+@pytest.mark.django_db
+def test_final_partial_refund_of_remainder_is_full_refund(alt_event, order):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+    )
+    remainder = order.refunds.create(
+        provider="postfinance",
+        amount=order.total - Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(remainder) is None
+
+
+@pytest.mark.django_db
+def test_refund_settled_by_other_means_is_not_a_postfinance_remainder(alt_event, order):
+    # A manual refund does not draw on the PostFinance transaction, so the
+    # PostFinance refund that follows is still a partial one and must be
+    # converted instead of refunding the whole outstanding charge.
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    order.refunds.create(
+        provider="manual",
+        amount=order.total - Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+    )
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(refund) == Decimal("4.65")
+
+
+@pytest.mark.django_db
+def test_refund_of_production_space_payment_counts_toward_remainder(alt_event, order):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    order.refunds.create(
+        provider="postfinance_prod",
+        amount=Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+    )
+    remainder = order.refunds.create(
+        provider="postfinance",
+        amount=order.total - Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(remainder) is None
+
+
+@pytest.mark.django_db
+def test_externally_recorded_postfinance_refund_counts_toward_remainder(alt_event, order):
+    # Refunded in the PostFinance dashboard and recorded in pretix: the
+    # transaction's remaining charge is reduced just the same.
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_EXTERNAL,
+    )
+    remainder = order.refunds.create(
+        provider="postfinance",
+        amount=order.total - Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(remainder) is None
+
+
+@pytest.mark.django_db
+def test_partial_refund_without_stored_rate_raises(alt_event, order):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order, fx_rate=None)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    with pytest.raises(PaymentException):
+        provider._refund_transaction_amount(refund)
+
+
+@pytest.mark.django_db
+def test_partial_refund_uses_stored_rate_not_current_setting(alt_event, order):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order, fx_rate="0.90")
+    alt_event.settings.set("payment_postfinance_alt_currency_rate", "1.10")
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(refund) == Decimal("4.50")
+
+
+# Webhooks and display
+
+
+@pytest.mark.django_db
+def test_webhook_preserves_fx_snapshot(alt_event, order, monkeypatch, transaction_factory):
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: transaction_factory(state=TransactionState.FULFILL),
+    )
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        state=OrderPayment.PAYMENT_STATE_PENDING,
+        info=json.dumps(
+            {
+                "transaction_id": 123456,
+                "fx_rate": "0.93",
+                "charged_currency": "CHF",
+                "charged_amount": "12.43",
+            }
+        ),
+    )
+
+    status, processed = _process_transaction_webhook(123456, "12345")
+
+    assert status == "ok"
+    assert processed is True
+    payment.refresh_from_db()
+    order.refresh_from_db()
+    assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+    assert order.status == Order.STATUS_PAID
+    assert payment.info_data["fx_rate"] == "0.93"
+
+
+@pytest.mark.django_db
+def test_payment_presale_render_shows_charged_amount(alt_event, order):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+
+    rendered = provider.payment_presale_render(payment)
+
+    assert "12.43" in rendered
+    assert "CHF" in rendered

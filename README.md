@@ -78,6 +78,9 @@ Configure the plugin in your pretix settings with:
 - Test mode support, including an opt-in option to offer the production space
   alongside the test space while in test mode, so it can be verified
   end-to-end before going live
+- Optional alternative payment currency: customers can choose to be charged
+  in a different currency (e.g. CHF on a EUR event) at a configured exchange
+  rate (see below)
 
 ### Testing the production space
 
@@ -103,6 +106,25 @@ you are actively running that verification, and switch it back off afterwards.
 Set up webhooks for both spaces (there is a separate "Setup webhooks" button
 next to each set of credentials), otherwise payments in the space without a
 webhook are never confirmed automatically.
+
+### Charging in an alternative currency
+
+Events priced in one currency (e.g. EUR) can offer customers the option to be
+charged in another (e.g. CHF for Swiss customers). pretix itself keeps all
+accounting (orders, invoices, refunds) in the event currency; only the charge
+sent to PostFinance is converted.
+
+To use it, set the **alternative payment currency** and the **exchange rate**
+(how much of that currency is charged per 1 unit of the event currency) in
+the provider settings. Include a small margin in the rate to cover exchange
+rate fluctuations.
+
+Customers then see a "Pay in CHF" checkbox with the converted amount when
+they select PostFinance during checkout. The rate in effect when a payment is
+started is stored on the payment and is also used to convert partial refunds;
+full refunds are refunded by PostFinance at the exact remaining transaction
+amount. The charged amount and rate are shown to the customer during checkout
+and to organizers in the order's payment details.
 
 ## License
 
