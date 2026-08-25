@@ -41,6 +41,23 @@ devenv shell -- uv run ty check pretix_postfinance/
 devenv shell -- uv run pytest tests/ -q -W ignore --cov=pretix_postfinance --cov-report=term-missing
 ```
 
+### Testing against the pretix fork
+
+The plugin supports two pretixes: the upstream release pinned in `uv.lock`,
+and the EFCC fork (`the-efcc/pretix`, branch `efcc`), which is the only one
+with installments. The installment tests skip themselves on upstream, so the
+fork has to be installed to run them:
+
+```bash
+git clone --branch efcc https://github.com/the-efcc/pretix .pretix-fork
+uv pip install -e ./.pretix-fork
+uv run --no-sync pytest tests/ -q -W ignore   # nothing should skip
+uv sync --all-extras                          # back to upstream pretix
+```
+
+CI runs both: the `test` job on upstream across Python 3.11-3.14, and the
+`test (pretix fork)` job on the fork, which fails if any test skips.
+
 ## Important Conventions
 
 2. **Type Hints**: use `PretixHttpRequest` for views

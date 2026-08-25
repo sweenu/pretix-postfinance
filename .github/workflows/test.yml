@@ -48,6 +48,85 @@ jobs:
           fail_ci_if_error: false
           verbose: true
 
+  test-fork:
+    # The plugin has to work on two pretixes: the upstream release the
+    # lockfile pins (covered by the "test" job above) and the EFCC fork,
+    # which is the only one that has installments. Both are exercised by
+    # the same suite — the installment tests skip themselves where pretix
+    # cannot provide plans — so without this job the fork side of that
+    # code would never run in CI.
+    name: test (pretix fork)
+    runs-on: ubuntu-latest
+
+    env:
+      # Tracks the fork's integration branch on purpose: this job exists to
+      # notice when the fork moves in a way the plugin does not follow. That
+      # also means an unrelated push to the fork can turn this job red
+      # without a change here — pin it to a commit SHA if that gets in the
+      # way, and bump the pin deliberately.
+      PRETIX_FORK_REF: efcc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        # Install from uv.lock, see the test job above. This brings in the
+        # upstream pretix, which the next step replaces with the fork.
+        run: uv sync --extra dev
+
+      - name: Check out the pretix fork
+        uses: actions/checkout@v4
+        with:
+          repository: the-efcc/pretix
+          ref: ${{ env.PRETIX_FORK_REF }}
+          path: .pretix-fork
+
+      - name: Install the pretix fork
+        # Replaces the pretix from the lockfile. The fork is newer than the
+        # pinned release, so its own dependency bounds are resolved fresh —
+        # that is the point of the job, not an oversight.
+        run: uv pip install -e ./.pretix-fork
+
+      - name: Verify the fork is what is installed
+        # A missing app would make every installment test skip itself and
+        # leave this job green while testing nothing at all.
+        env:
+          DJANGO_SETTINGS_MODULE: tests.settings
+        run: |
+          uv run --no-sync python -c "
+          import django
+          django.setup()
+          import pretix
+          from django.apps import apps
+          from pretix.efcc.models import InstallmentPlan, ScheduledInstallment
+          print('pretix', pretix.__version__, 'from', pretix.__file__)
+          print('installments app:', apps.get_app_config('efcc').verbose_name)
+          "
+
+      - name: Run tests against the fork
+        run: |
+          set -o pipefail
+          uv run --no-sync pytest tests/ -v -rs | tee pytest.log
+
+      - name: Fail if any test skipped itself
+        # On the fork nothing has a reason to skip. A skip here means the
+        # suite quietly decided pretix has no installments, which is the one
+        # failure this job is meant to catch.
+        run: |
+          if grep -q "SKIPPED" pytest.log; then
+            echo "::error::Tests skipped while running against the pretix fork:"
+            grep "SKIPPED" pytest.log
+            exit 1
+          fi
+
   coverage-diff:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
