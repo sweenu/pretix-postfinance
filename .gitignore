@@ -68,6 +68,9 @@ tasks
 prd.json
 progress.txt
 
+# Local checkout of the pretix fork, as the test-fork CI job makes it
+.pretix-fork/
+
 # Nix
 result
 .devenv/
