@@ -143,6 +143,9 @@ plugin implements the provider side of that:
   against it without the customer present, on the schedule pretix keeps.
 - The token is deleted at PostFinance once the plan completes or is
   cancelled, so a stored payment method cannot be charged afterwards.
+- Each automatic charge records its transaction on the payment, so an
+  individual installment can be refunded through pretix like any other
+  payment. A declined charge is recorded too, carrying PostFinance's reason.
 
 Installments are only offered when the pretix installation provides them
 (upstream pretix does not) and the event has them switched on. Enabling them,
