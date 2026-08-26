@@ -61,6 +61,36 @@ uv run ty check pretix_postfinance/
 uv run pytest tests/ --cov=pretix_postfinance --cov-report=term-missing -v
 ```
 
+### Translations
+
+Translatable strings live in `pretix_postfinance/locale/<lang>/LC_MESSAGES/`,
+in two domains: `django.po` for Python and templates, `djangojs.po` for the
+control panel JavaScript. The plugin ships French, German, Italian and
+Spanish; the `.mo` files are compiled at build time and are not committed.
+
+After changing any user-facing string, re-extract and fill in the new
+messages:
+
+```bash
+cd pretix_postfinance
+DJANGO_SETTINGS_MODULE=tests.settings PYTHONPATH=.. \
+    uv run django-admin makemessages -l de -l fr -l it -l es --no-obsolete
+DJANGO_SETTINGS_MODULE=tests.settings PYTHONPATH=.. \
+    uv run django-admin makemessages -d djangojs -l de -l fr -l it -l es --no-obsolete
+```
+
+Then translate the empty and `#, fuzzy` entries, drop the fuzzy markers, and
+check the result compiles:
+
+```bash
+msgfmt --check --check-format --statistics -o /dev/null \
+    pretix_postfinance/locale/*/LC_MESSAGES/*.po
+```
+
+Note that `xgettext` does not look inside f-strings, so a string only gets
+extracted if `_()` wraps the whole literal — use `_("... {name} ...").format(...)`
+rather than `f"... {_('...')} ..."`.
+
 ### Configuration
 
 Configure the plugin in your pretix settings with:
@@ -84,6 +114,8 @@ Configure the plugin in your pretix settings with:
 - Installment plans, where pretix supports them: the first installment is paid
   on the payment page and the rest are charged automatically against a stored
   payment method (see below)
+- Translated into French, German, Italian and Spanish, for both the checkout
+  pages customers see and the control panel organizers use
 
 ### Testing the production space
 
