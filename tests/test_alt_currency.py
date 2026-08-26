@@ -648,3 +648,73 @@ def test_payment_presale_render_shows_charged_amount(alt_event, order):
 
     assert "12.43" in rendered
     assert "CHF" in rendered
+
+
+# Shredding
+
+
+@pytest.mark.django_db
+def test_shredding_keeps_the_fx_snapshot(alt_event, order):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+
+    provider.shred_payment_info(payment)
+
+    payment.refresh_from_db()
+    info = payment.info_data
+    assert info["charged_currency"] == "CHF"
+    assert info["charged_amount"] == "12.43"
+    assert info["fx_rate"] == "0.93"
+    assert info["fx_base_currency"] == "EUR"
+    assert info["_shredded"] is True
+
+
+@pytest.mark.django_db
+def test_refund_after_shredding_stays_in_the_charged_currency(alt_event, order):
+    """A shredded payment must not refund the event currency amount.
+
+    The transaction is booked in CHF. Losing the FX snapshot used to make
+    the payment look like a plain EUR one, so a 5.00 EUR refund sent 5.00
+    to a CHF transaction — an over-refund of about 8%.
+    """
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    provider.shred_payment_info(payment)
+    payment.refresh_from_db()
+
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    assert provider._refund_transaction_amount(refund) == Decimal("4.65")
+
+
+@pytest.mark.django_db
+def test_shredded_refund_keeps_the_amount_it_booked(alt_event, order):
+    # The booked CHF is what the next refund on the transaction draws
+    # down, so shredding must not force it back to a re-conversion.
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    sibling = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("5.00"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+        info=json.dumps({"refund_id": 1, "amount": 4.65, "created_on": "2026-01-13T11:00:00Z"}),
+    )
+
+    provider.shred_payment_info(sibling)
+
+    sibling.refresh_from_db()
+    assert sibling.info_data["refund_id"] == 1
+    assert sibling.info_data["amount"] == 4.65
+    assert sibling.info_data.get("created_on") is None
+
+    remainder = order.refunds.create(
+        provider="postfinance",
+        amount=order.total - Decimal("5.00"),
+        payment=payment,
+    )
+    assert provider._refund_transaction_amount(remainder) == Decimal("7.78")

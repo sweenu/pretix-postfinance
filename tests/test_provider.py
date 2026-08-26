@@ -733,6 +733,77 @@ def test_shred_payment_info(env):
 
 
 @pytest.mark.django_db
+def test_shred_payment_info_drops_the_token_id(env):
+    event, order = env
+
+    prov = PostFinancePaymentProvider(event)
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps(
+            {
+                "transaction_id": 123456,
+                "state": TransactionState.COMPLETED.value,
+                "installment_charge": True,
+                "token_id": 42,
+            }
+        ),
+    )
+
+    prov.shred_payment_info(payment)
+
+    payment.refresh_from_db()
+    info = payment.info_data
+    # A handle to the customer's stored payment method is personal data
+    assert info.get("token_id") is None
+    # ... but the flag that keeps a late webhook from writing a token back
+    # onto the plan is not, and the guard needs it
+    assert info.get("installment_charge") is True
+
+
+@pytest.mark.django_db
+def test_shred_refund_info_keeps_external_references(env):
+    event, order = env
+
+    order.status = Order.STATUS_PAID
+    order.save()
+
+    prov = PostFinancePaymentProvider(event)
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"transaction_id": 123456}),
+    )
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+        info=json.dumps(
+            {
+                "refund_id": 789012,
+                "state": "SUCCESSFUL",
+                "amount": 13.37,
+                "created_on": "2026-01-13T11:00:00Z",
+            }
+        ),
+    )
+
+    prov.shred_payment_info(refund)
+
+    refund.refresh_from_db()
+    info = refund.info_data
+    assert info.get("refund_id") == 789012
+    assert info.get("state") == "SUCCESSFUL"
+    assert info.get("amount") == 13.37
+    assert info.get("_shredded") is True
+    assert info.get("created_on") is None
+    # Still matchable against PostFinance's own records
+    assert prov.refund_matching_id(refund) == "789012"
+
+
+@pytest.mark.django_db
 def test_api_refund_details(env):
     event, order = env
 

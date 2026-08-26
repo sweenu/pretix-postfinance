@@ -2269,24 +2269,44 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     def shred_payment_info(self, obj: OrderPayment | OrderRefund) -> None:
         """
         Remove personal data from payment/refund info when requested.
+
+        What describes the money movement itself is kept: it is not personal
+        data on its own, and refunding through PostFinance after an event was
+        shredded still depends on it. The FX snapshot in particular has to
+        survive — without it a refund of a payment charged in the alternative
+        currency looks like a plain event-currency payment, and the event
+        currency amount would be sent to a transaction booked in another
+        currency. The token ID is deliberately not kept: it is a handle to the
+        customer's stored payment method, and the plan revokes it anyway.
         """
         if not isinstance(obj, (OrderPayment, OrderRefund)):
             return
 
-        # Keep transaction/refund IDs for reference, but remove other details
+        info_data = obj.info_data or {}
         if isinstance(obj, OrderPayment):
-            info_data = obj.info_data or {}
-            obj.info_data = {
+            kept: dict[str, Any] = {
                 "transaction_id": info_data.get("transaction_id"),
                 SPACE_ID_KEY: info_data.get(SPACE_ID_KEY),
                 "state": info_data.get("state"),
-                "_shredded": True,
             }
-            obj.save(update_fields=["info"])
+            # Marks the payment as an automatic charge, which keeps a late
+            # webhook for it from writing a token back onto its plan.
+            if info_data.get(INSTALLMENT_CHARGE_KEY):
+                kept[INSTALLMENT_CHARGE_KEY] = True
+            kept.update({key: info_data[key] for key in FX_INFO_KEYS if info_data.get(key)})
         else:
-            # For refunds, clear the info
-            obj.info_data = {"_shredded": True}
-            obj.save(update_fields=["info"])
+            # The booked amount is what the next refund on the same
+            # transaction draws down, so losing it would make that refund
+            # fall back to re-converting and drift by a cent.
+            kept = {
+                "refund_id": info_data.get("refund_id"),
+                SPACE_ID_KEY: info_data.get(SPACE_ID_KEY),
+                "state": info_data.get("state"),
+                "amount": info_data.get("amount"),
+            }
+
+        obj.info_data = {**kept, "_shredded": True}
+        obj.save(update_fields=["info"])
 
 
 class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
