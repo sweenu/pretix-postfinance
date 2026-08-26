@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from django_scopes import scopes_disabled
 from postfinancecheckout.models import ChargeState, TransactionState
-from pretix.base.models import OrderPayment
+from pretix.base.models import Order, OrderPayment, OrderRefund
 
 pytest.importorskip("pretix.efcc.models", reason="requires pretix with installments")
 
@@ -84,7 +84,10 @@ def postfinance(monkeypatch):
     One stub for the whole flow, so the interactive first payment and the
     later token charges cannot shadow each other's patches.
     """
-    api = SimpleNamespace(transactions=[], revoked=[], transaction=fulfilled_transaction())
+    api = SimpleNamespace(
+        transactions=[], revoked=[], refunds=[], decline=None,
+        transaction=fulfilled_transaction(),
+    )
 
     def create_transaction(self, **kwargs):
         api.transactions.append(kwargs)
@@ -102,13 +105,50 @@ def postfinance(monkeypatch):
         "pretix_postfinance.payment.PostFinanceClient.get_transaction",
         lambda self, tid: api.transaction,
     )
+    def process_with_token(self, tid):
+        if api.decline is not None:
+            return SimpleNamespace(
+                state=ChargeState.FAILED,
+                failure_reason=SimpleNamespace(description=api.decline),
+                transaction=SimpleNamespace(
+                    id=tid,
+                    state=TransactionState.FAILED,
+                    payment_connector_configuration=None,
+                    created_on=None,
+                ),
+            )
+        return SimpleNamespace(
+            state=ChargeState.SUCCESSFUL,
+            failure_reason=None,
+            transaction=SimpleNamespace(
+                id=tid,
+                state=TransactionState.FULFILL,
+                payment_connector_configuration=SimpleNamespace(name="TWINT"),
+                created_on="2026-01-13T10:00:00Z",
+            ),
+        )
+
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.process_with_token",
-        lambda self, tid: SimpleNamespace(state=ChargeState.SUCCESSFUL, failure_reason=None),
+        process_with_token,
     )
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.delete_token",
         lambda self, tid: api.revoked.append(tid),
+    )
+
+    def refund_transaction(self, **kwargs):
+        api.refunds.append(kwargs)
+        return SimpleNamespace(
+            id=555000 + len(api.refunds),
+            state=SimpleNamespace(value="SUCCESSFUL"),
+            amount=float(kwargs.get("amount") or 0),
+            created_on="2026-01-13T12:00:00Z",
+        )
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction",
+        refund_transaction,
     )
 
     # Only the charges pretix schedules carry a token; the first payment is
@@ -216,7 +256,9 @@ def test_full_plan_lifecycle_in_event_currency(
     assert plan.installments_paid == 3
     assert postfinance.revoked == [TOKEN_ID]
 
-    assert plan.order.pending_sum == Decimal("0.00")
+    installments_order.refresh_from_db()
+    assert installments_order.pending_sum == Decimal("0.00")
+    assert installments_order.status == Order.STATUS_PAID
 
 
 @pytest.mark.django_db
@@ -265,7 +307,9 @@ def test_full_plan_lifecycle_in_alternative_currency(
         Decimal("100.00"),
         Decimal("100.00"),
     ]
-    assert plan.order.pending_sum == Decimal("0.00")
+    installments_order.refresh_from_db()
+    assert installments_order.pending_sum == Decimal("0.00")
+    assert installments_order.status == Order.STATUS_PAID
     assert postfinance.revoked == [TOKEN_ID]
 
 
@@ -316,6 +360,132 @@ def test_uneven_split_converts_each_share(
         35.66,
         35.67,
     ]
+
+
+@pytest.mark.django_db
+def test_an_automatic_charge_can_be_refunded(
+    installments_event, installments_order, pay_first_installment, postfinance
+):
+    """
+    An automatic charge used to leave no transaction reference behind, so
+    pretix declined to refund it and the money had to be returned from the
+    PostFinance dashboard by hand.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    pay_first_installment(installments_event, first_payment_of(plan))
+    assert process_single_installment(due(plan, 2)) is True
+
+    payment = due(plan, 2).payment
+    prov = PostFinancePaymentProvider(installments_event)
+    assert prov.payment_refund_supported(payment) is True
+
+    refund = installments_order.refunds.create(
+        payment=payment,
+        provider="postfinance",
+        amount=payment.amount,
+        source=OrderRefund.REFUND_SOURCE_ADMIN,
+        state=OrderRefund.REFUND_STATE_CREATED,
+    )
+    prov.execute_refund(refund)
+
+    assert postfinance.refunds[0]["transaction_id"] == payment.info_data["transaction_id"]
+    assert postfinance.refunds[0]["amount"] == Decimal("100.00")
+
+
+@pytest.mark.django_db
+def test_an_automatic_charge_is_refunded_in_the_currency_it_was_charged_in(
+    alt_currency_event, installments_order, pay_first_installment, postfinance
+):
+    """
+    Refunding 100 CHF against a transaction charged as 107 EUR would be
+    rejected, or return the wrong amount. The rate recorded on the payment
+    is what converts it back.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    pay_first_installment(alt_currency_event, first_payment_of(plan), pay_alt=True)
+    assert process_single_installment(due(plan, 2)) is True
+
+    payment = due(plan, 2).payment
+    assert payment.info_data["charged_currency"] == "EUR"
+
+    refund = installments_order.refunds.create(
+        payment=payment,
+        provider="postfinance",
+        amount=payment.amount,
+        source=OrderRefund.REFUND_SOURCE_ADMIN,
+        state=OrderRefund.REFUND_STATE_CREATED,
+    )
+    PostFinancePaymentProvider(alt_currency_event).execute_refund(refund)
+
+    # pretix refunds 100.00 CHF; PostFinance is sent the 107.00 EUR charged.
+    assert refund.amount == Decimal("100.00")
+    assert postfinance.refunds[0]["amount"] == Decimal("107.00")
+
+
+@pytest.mark.django_db
+def test_a_declined_charge_leaves_a_failed_payment(
+    installments_event, installments_order, pay_first_installment, postfinance
+):
+    """
+    The decline is recorded on the order as a failed payment carrying
+    PostFinance's reason, and does not count towards what has been paid.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    pay_first_installment(installments_event, first_payment_of(plan))
+
+    postfinance.decline = "Insufficient funds"
+    assert process_single_installment(due(plan, 2)) is False
+
+    installment = due(plan, 2)
+    assert installment.state == ScheduledInstallment.STATE_FAILED
+    assert installment.failure_reason == "Insufficient funds"
+    assert installment.payment.state == OrderPayment.PAYMENT_STATE_FAILED
+    assert installment.payment.info_data["error"] == "Insufficient funds"
+    assert installment.payment.info_data["transaction_id"]
+
+    installments_order.refresh_from_db()
+    assert installments_order.pending_sum == Decimal("200.00")
+
+    plan.refresh_from_db()
+    assert plan.status == InstallmentPlan.STATUS_ACTIVE
+    assert plan.grace_period_end is not None
+
+
+@pytest.mark.django_db
+def test_a_webhook_for_an_automatic_charge_leaves_the_token_alone(
+    installments_event, installments_order, pay_first_installment, postfinance, monkeypatch
+):
+    """
+    A late webhook for an automatic charge must not write a token back onto
+    a plan pretix has already finished and cleared.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 2)
+    pay_first_installment(installments_event, first_payment_of(plan))
+    assert process_single_installment(due(plan, 2)) is True
+
+    plan.refresh_from_db()
+    assert plan.status == InstallmentPlan.STATUS_COMPLETED
+    assert plan.payment_token == {}
+
+    charge_payment = due(plan, 2).payment
+    transaction_id = charge_payment.info_data["transaction_id"]
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: fulfilled_transaction(),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.views._client_for_entity",
+        lambda entity, space_id, entity_id, kind: (
+            PostFinancePaymentProvider(installments_event)._get_client(),
+            "ok",
+        ),
+    )
+
+    with scopes_disabled():
+        _process_transaction_webhook(transaction_id, 12345)
+
+    plan.refresh_from_db()
+    assert plan.payment_token == {}
 
 
 @pytest.mark.django_db

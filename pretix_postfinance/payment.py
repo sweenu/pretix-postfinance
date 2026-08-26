@@ -77,9 +77,14 @@ ERROR_STATUS_MESSAGES = {
 
 PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
 
-# Key under which the ID of a reusable PostFinance token is recorded on
-# the first installment payment, for reference from the admin view.
+# Key under which the ID of the reusable PostFinance token a payment is
+# associated with is recorded: the token an interactive installment payment
+# created, or the one an automatic charge was made against.
 TOKEN_ID_KEY = "token_id"
+
+# Marks a payment as an automatic charge against a plan's stored token,
+# rather than one the customer made on the payment page.
+INSTALLMENT_CHARGE_KEY = "installment_charge"
 
 # info_data keys describing a payment charged in a different currency than
 # the event's. Written when a transaction is created, they snapshot the
@@ -1514,21 +1519,33 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def store_installment_token(self, payment: OrderPayment, transaction: Any) -> None:
         """
-        Record the reusable token a plan's first payment produced.
+        Record the reusable token an interactive installment payment produced.
 
-        Called from both paths that can settle that payment — the customer
+        That is a plan's first payment, and any later one the customer makes
+        themselves to recover from a declined charge — where the whole point
+        may be that they are switching to a card that works, so the new
+        token replaces the old.
+
+        Called from both paths that can settle such a payment — the customer
         returning from the payment page and the transaction webhook —
         because whichever gets there first is the only one that sees the
         transaction, and without a stored token every later installment of
         the plan fails.
 
         The currency the customer was actually charged in is snapshotted
-        alongside the token: later installments are charged without the
-        customer present, so there is no checkout to ask again, and they
-        must follow the currency and rate the plan was sold at.
+        alongside the token: the automatic charges have no checkout to ask
+        again, so they follow whatever the last interactive payment chose.
         """
         installment = scheduled_installment_for_payment(payment)
         if installment is None:
+            return
+
+        info_data = payment.info_data or {}
+        if info_data.get(INSTALLMENT_CHARGE_KEY):
+            # An automatic charge against the plan's own token. It cannot
+            # have produced a new one, and a late webhook for it must not
+            # write a token back onto a plan that has since been completed
+            # or cancelled — pretix clears the token in both cases.
             return
 
         plan = plan_for_order(payment.order)
@@ -1549,7 +1566,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             return
 
-        info_data = payment.info_data or {}
         token_data: dict[str, Any] = {
             "token_id": token_id,
             "customer_id": getattr(token, "customer_id", None),
@@ -1575,27 +1591,25 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             plan.pk,
         )
 
-    def installment_charge(self, plan: Any, installment: Any) -> tuple[str, Decimal]:
+    def _installment_fx(self, plan: Any) -> tuple[str, Decimal] | None:
         """
-        Return the currency and amount to charge for one installment.
+        Return the currency and rate an installment plan is charged at.
 
-        pretix schedules installments in the event currency. When the
-        customer chose to pay in the alternative currency, the plan was sold
-        at the rate quoted then, so each installment converts its own share
-        at that snapshotted rate rather than at today's setting — otherwise
-        a rate change mid-plan would silently reprice the remaining
-        installments.
+        ``None`` when the plan is charged in the event currency, which is
+        the ordinary case.
 
-        :raises PaymentException: If the plan was charged in a currency whose
-            rate is no longer known, so no amount can be derived.
+        The rate is the one snapshotted with the token when the plan was
+        sold, not today's setting: otherwise a rate change mid-plan would
+        silently reprice the installments the customer has left.
+
+        :raises PaymentException: If the plan is charged in a currency whose
+            rate is no longer known, so no amount can be derived from it.
         """
-        amount = Decimal(str(installment.amount))
         base_currency = str(plan.order.event.currency)
-
         token_data = plan.payment_token or {}
         charged_currency = token_data.get("charged_currency")
         if not charged_currency or charged_currency == base_currency:
-            return base_currency, amount
+            return None
 
         raw_rate = token_data.get("fx_rate")
         if raw_rate is None:
@@ -1611,28 +1625,86 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         if rate <= 0:
             raise self._unknown_rate_exception(str(charged_currency))
 
-        return str(charged_currency), self._convert(amount, rate)
+        return str(charged_currency), rate
+
+    def installment_charge(self, plan: Any, installment: Any) -> tuple[str, Decimal]:
+        """
+        Return the currency and amount to charge for one installment.
+
+        pretix schedules installments in the event currency; a plan sold in
+        the alternative currency converts each share on its own, so the
+        charges follow pretix's split rather than re-dividing a converted
+        total.
+        """
+        amount = Decimal(str(installment.amount))
+        fx = self._installment_fx(plan)
+        if fx is None:
+            return str(plan.order.event.currency), amount
+        currency, rate = fx
+        return currency, self._convert(amount, rate)
 
     @staticmethod
-    def _fail_installment(installment: Any, reason: str) -> bool:
-        """Record why an installment could not be charged."""
+    def _transaction_info(transaction: Any) -> dict[str, Any]:
+        """
+        Describe a transaction the way the interactive payment paths do.
+
+        Above all this carries the transaction state, which is what decides
+        whether the payment can be refunded later.
+        """
+        if transaction is None:
+            return {}
+        state = getattr(transaction, "state", None)
+        connector = getattr(transaction, "payment_connector_configuration", None)
+        created_on = getattr(transaction, "created_on", None)
+        return {
+            "state": state.value if state else None,
+            "payment_method": getattr(connector, "name", None) if connector else None,
+            "created_on": str(created_on) if created_on else None,
+        }
+
+    @staticmethod
+    def _fail_installment(
+        installment: Any, payment: OrderPayment | None, reason: str, info: dict[str, Any]
+    ) -> bool:
+        """
+        Record why an installment could not be charged.
+
+        The reason goes on the installment, which is what pretix shows the
+        customer and the organizer, and on the payment, which pretix marks
+        failed with whatever we leave in ``info_data``.
+        """
         installment.failure_reason = reason
         installment.save(update_fields=["failure_reason"])
+        if payment is not None:
+            payment.info_data = {**info, "error": reason}
         return False
 
-    def execute_installment(self, plan: Any, installment: Any) -> bool:
+    def execute_installment(
+        self, plan: Any, installment: Any, payment: OrderPayment
+    ) -> bool:
         """
         Charge a scheduled installment against the plan's stored token.
 
         Runs without the customer present, from pretix's periodic task, so
         it never raises: a failure is reported by returning ``False`` with a
-        reason recorded on the installment, which pretix turns into a grace
-        period and a notification.
+        reason recorded on the installment and the payment, which pretix
+        turns into a grace period and a notification.
+
+        ``payment`` is an ``OrderPayment`` in state ``created`` that pretix
+        has already built for this installment. It does not need saving —
+        pretix persists ``info`` when it confirms or fails the payment — but
+        what goes in it decides what can be done with the charge afterwards:
+        without the transaction reference the payment cannot be refunded.
 
         :param plan: The InstallmentPlan holding the token to charge
         :param installment: The ScheduledInstallment to pay
+        :param payment: The OrderPayment to record this charge against
         :return: True if the charge succeeded
         """
+        # Marks the payment as an automatic charge rather than something the
+        # customer paid on the payment page. `store_installment_token` reads
+        # it to know a webhook for this transaction cannot carry a new token.
+        info: dict[str, Any] = {INSTALLMENT_CHARGE_KEY: True}
         try:
             token_data = plan.payment_token or {}
             token_id = token_data.get("token_id")
@@ -1642,9 +1714,24 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     installment.pk,
                     plan.order.code,
                 )
-                return self._fail_installment(installment, "No payment token available")
+                return self._fail_installment(
+                    installment, payment, "No payment token available", info
+                )
 
             currency, amount = self.installment_charge(plan, installment)
+            fx = self._installment_fx(plan)
+            if fx is not None:
+                # Snapshotted on the payment the same way an interactive
+                # payment does it, so refunds of this installment convert
+                # back at the rate it was actually charged at.
+                info.update(
+                    {
+                        "fx_rate": str(fx[1]),
+                        "fx_base_currency": str(plan.order.event.currency),
+                        "charged_currency": currency,
+                        "charged_amount": str(amount),
+                    }
+                )
 
             line_items = [
                 LineItemCreate(
@@ -1681,8 +1768,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     plan.order.code,
                 )
                 return self._fail_installment(
-                    installment, "PostFinance transaction missing ID"
+                    installment, payment, "PostFinance transaction missing ID", info
                 )
+
+            info.update(
+                {
+                    "transaction_id": transaction.id,
+                    SPACE_ID_KEY: client.space_id,
+                    TOKEN_ID_KEY: token_id,
+                }
+            )
+            # Recorded before the charge is made: if the call dies after the
+            # money moved, the payment still names the transaction to
+            # reconcile and refund against.
+            payment.info_data = info
 
             logger.info(
                 "Created installment transaction %s for installment %s of order %s "
@@ -1697,6 +1796,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
             charge = client.process_with_token(transaction.id)
             charge_state = charge.state
+            info.update(self._transaction_info(getattr(charge, "transaction", None)))
+            payment.info_data = info
 
             if charge_state == ChargeState.SUCCESSFUL:
                 logger.info(
@@ -1720,7 +1821,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     failure_reason,
                 )
                 return self._fail_installment(
-                    installment, str(failure_reason or "PostFinance charge failed")
+                    installment,
+                    payment,
+                    str(failure_reason or "PostFinance charge failed"),
+                    info,
                 )
 
             logger.warning(
@@ -1732,9 +1836,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             return self._fail_installment(
                 installment,
+                payment,
                 f"PostFinance charge not successful: {charge_state.value}"
                 if charge_state
                 else "PostFinance charge not successful",
+                info,
             )
 
         except PaymentException as e:
@@ -1744,15 +1850,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 plan.order.code,
                 e,
             )
-            return self._fail_installment(installment, str(e))
+            return self._fail_installment(installment, payment, str(e), info)
 
         except PostFinanceError as e:
             logger.exception("PostFinance API error during installment execution: %s", e)
-            return self._fail_installment(installment, str(e))
+            return self._fail_installment(installment, payment, str(e), info)
 
         except Exception as e:
             logger.exception("Unexpected error during installment execution: %s", e)
-            return self._fail_installment(installment, str(e))
+            return self._fail_installment(installment, payment, str(e), info)
+
 
     def revoke_payment_token(self, plan: Any) -> None:
         """

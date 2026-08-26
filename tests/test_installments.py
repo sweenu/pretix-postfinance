@@ -47,6 +47,11 @@ def make_plan(event, order, *, token=None, total_installments=3):
     return plan
 
 
+def make_payment(order, *, amount="100.00"):
+    """A stand-in for the `created` OrderPayment pretix hands the provider."""
+    return SimpleNamespace(pk=7, order=order, amount=Decimal(amount), info_data={})
+
+
 def make_installment(plan, *, number=2, amount="100.00"):
     """A stand-in for ``ScheduledInstallment``."""
     installment = SimpleNamespace(
@@ -80,10 +85,23 @@ def charge_calls(monkeypatch):
     return calls
 
 
-def successful_charge(monkeypatch):
+def charged_transaction(state=TransactionState.FULFILL):
+    return SimpleNamespace(
+        id=234567,
+        state=state,
+        payment_connector_configuration=SimpleNamespace(name="TWINT"),
+        created_on="2026-01-13T10:00:00Z",
+    )
+
+
+def successful_charge(monkeypatch, transaction=None):
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.process_with_token",
-        lambda self, tid: SimpleNamespace(state=ChargeState.SUCCESSFUL, failure_reason=None),
+        lambda self, tid: SimpleNamespace(
+            state=ChargeState.SUCCESSFUL,
+            failure_reason=None,
+            transaction=transaction if transaction is not None else charged_transaction(),
+        ),
     )
 
 
@@ -109,9 +127,10 @@ def test_execute_installment_charges_event_currency(
     successful_charge(monkeypatch)
     plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
     installment = make_installment(plan, number=2, amount="100.00")
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment) is True
+    assert prov.execute_installment(plan, installment, payment) is True
 
     create = charge_calls["create"]
     assert create["currency"] == "CHF"
@@ -133,9 +152,10 @@ def test_execute_installment_charges_alternative_currency(
         token={**STORED_TOKEN, "charged_currency": "EUR", "fx_rate": "1.07"},
     )
     installment = make_installment(plan, number=2, amount="100.00")
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(alt_currency_event)
-    assert prov.execute_installment(plan, installment) is True
+    assert prov.execute_installment(plan, installment, payment) is True
 
     create = charge_calls["create"]
     assert create["currency"] == "EUR"
@@ -157,9 +177,10 @@ def test_installment_uses_snapshotted_rate_not_current_setting(
         token={**STORED_TOKEN, "charged_currency": "EUR", "fx_rate": "1.07"},
     )
     installment = make_installment(plan, number=3, amount="100.00")
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(alt_currency_event)
-    assert prov.execute_installment(plan, installment) is True
+    assert prov.execute_installment(plan, installment, payment) is True
 
     assert charge_calls["create"]["line_items"][0].amount_including_tax == 107.00
 
@@ -177,9 +198,10 @@ def test_installment_falls_back_to_configured_rate(
         alt_currency_event, order, token={**STORED_TOKEN, "charged_currency": "EUR"}
     )
     installment = make_installment(plan, number=2, amount="100.00")
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(alt_currency_event)
-    assert prov.execute_installment(plan, installment) is True
+    assert prov.execute_installment(plan, installment, payment) is True
 
     assert charge_calls["create"]["currency"] == "EUR"
     assert charge_calls["create"]["line_items"][0].amount_including_tax == 107.00
@@ -198,9 +220,10 @@ def test_installment_fails_when_rate_is_unknown(chf_event, order, monkeypatch):
     )
     plan = make_plan(chf_event, order, token={**STORED_TOKEN, "charged_currency": "EUR"})
     installment = make_installment(plan, number=2, amount="100.00")
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment) is False
+    assert prov.execute_installment(plan, installment, payment) is False
 
     assert "exchange rate" in installment.failure_reason
     created.assert_not_called()
@@ -218,21 +241,150 @@ def test_installment_rounds_each_share_independently(
         token={**STORED_TOKEN, "charged_currency": "EUR", "fx_rate": "1.07"},
     )
     installment = make_installment(plan, number=3, amount="33.34")
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(alt_currency_event)
-    assert prov.execute_installment(plan, installment) is True
+    assert prov.execute_installment(plan, installment, payment) is True
 
     # 33.34 * 1.07 = 35.6738
     assert charge_calls["create"]["line_items"][0].amount_including_tax == 35.67
 
 
 @pytest.mark.django_db
+def test_charge_is_recorded_on_the_payment(chf_event, order, monkeypatch, charge_calls):
+    """
+    pretix persists what we leave on the payment. Without the transaction
+    reference and a refundable state the charge could not be refunded
+    through pretix at all.
+    """
+    successful_charge(monkeypatch)
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan)
+    payment = make_payment(order)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, payment) is True
+
+    info = payment.info_data
+    assert info["transaction_id"] == 234567
+    assert info["space_id"] == 12345
+    assert info["token_id"] == 999888
+    assert info["state"] == TransactionState.FULFILL.value
+    assert info["payment_method"] == "TWINT"
+    assert info["installment_charge"] is True
+
+    # ... which is what makes the payment refundable.
+    order.payments.create(provider="postfinance", amount=installment.amount)
+    recorded = order.payments.last()
+    recorded.info_data = info
+    assert prov.payment_refund_supported(recorded) is True
+
+
+@pytest.mark.django_db
+def test_alternative_currency_charge_is_recorded_on_the_payment(
+    alt_currency_event, order, monkeypatch, charge_calls
+):
+    """
+    A refund of this payment has to convert back at the rate it was charged
+    at, so the snapshot goes on the payment exactly as an interactive
+    payment records it.
+    """
+    successful_charge(monkeypatch)
+    plan = make_plan(
+        alt_currency_event,
+        order,
+        token={**STORED_TOKEN, "charged_currency": "EUR", "fx_rate": "1.07"},
+    )
+    installment = make_installment(plan, number=2, amount="100.00")
+    payment = make_payment(order)
+
+    prov = PostFinancePaymentProvider(alt_currency_event)
+    assert prov.execute_installment(plan, installment, payment) is True
+
+    info = payment.info_data
+    assert info["charged_currency"] == "EUR"
+    assert info["charged_amount"] == "107.00"
+    assert info["fx_rate"] == "1.07"
+    assert info["fx_base_currency"] == "CHF"
+
+
+@pytest.mark.django_db
+def test_event_currency_charge_records_no_exchange_rate(
+    chf_event, order, monkeypatch, charge_calls
+):
+    successful_charge(monkeypatch)
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan)
+    payment = make_payment(order)
+
+    PostFinancePaymentProvider(chf_event).execute_installment(plan, installment, payment)
+
+    assert "charged_currency" not in payment.info_data
+    assert "fx_rate" not in payment.info_data
+
+
+@pytest.mark.django_db
+def test_transaction_is_recorded_before_the_charge_is_made(
+    chf_event, order, monkeypatch, charge_calls
+):
+    """
+    A charge that dies after the money moved must still leave the payment
+    naming the transaction, or it can neither be reconciled nor refunded.
+    """
+    seen = {}
+
+    def die_after_charging(self, tid):
+        seen["info"] = dict(payment.info_data)
+        raise PostFinanceError("gateway timeout", status_code=504)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.process_with_token",
+        die_after_charging,
+    )
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan)
+    payment = make_payment(order)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, payment) is False
+
+    assert seen["info"]["transaction_id"] == 234567
+    assert payment.info_data["transaction_id"] == 234567
+    assert payment.info_data["error"] == "gateway timeout"
+
+
+@pytest.mark.django_db
+def test_failed_charge_is_recorded_on_the_payment(
+    chf_event, order, monkeypatch, charge_calls
+):
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.process_with_token",
+        lambda self, tid: SimpleNamespace(
+            state=ChargeState.FAILED,
+            failure_reason=SimpleNamespace(description="Insufficient funds"),
+            transaction=charged_transaction(state=TransactionState.FAILED),
+        ),
+    )
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan)
+    payment = make_payment(order)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, payment) is False
+
+    assert payment.info_data["error"] == "Insufficient funds"
+    assert payment.info_data["state"] == TransactionState.FAILED.value
+    assert payment.info_data["transaction_id"] == 234567
+
+
+@pytest.mark.django_db
 def test_execute_installment_without_token(chf_event, order):
     plan = make_plan(chf_event, order, token={})
     installment = make_installment(plan)
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment) is False
+    assert prov.execute_installment(plan, installment, payment) is False
     assert installment.failure_reason == "No payment token available"
 
 
@@ -245,13 +397,15 @@ def test_execute_installment_records_charge_failure(
         lambda self, tid: SimpleNamespace(
             state=ChargeState.FAILED,
             failure_reason=SimpleNamespace(description="Insufficient funds"),
+            transaction=charged_transaction(state=TransactionState.FAILED),
         ),
     )
     plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
     installment = make_installment(plan)
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment) is False
+    assert prov.execute_installment(plan, installment, payment) is False
     assert installment.failure_reason == "Insufficient funds"
 
 
@@ -265,13 +419,18 @@ def test_execute_installment_records_pending_charge_as_failure(
     """
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.process_with_token",
-        lambda self, tid: SimpleNamespace(state=ChargeState.PENDING, failure_reason=None),
+        lambda self, tid: SimpleNamespace(
+            state=ChargeState.PENDING,
+            failure_reason=None,
+            transaction=charged_transaction(state=TransactionState.PENDING),
+        ),
     )
     plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
     installment = make_installment(plan)
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment) is False
+    assert prov.execute_installment(plan, installment, payment) is False
     assert "not successful" in installment.failure_reason
 
 
@@ -285,9 +444,10 @@ def test_execute_installment_survives_api_error(chf_event, order, monkeypatch):
     )
     plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
     installment = make_installment(plan)
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment) is False
+    assert prov.execute_installment(plan, installment, payment) is False
     assert installment.failure_reason == "PostFinance is down"
 
 
@@ -299,9 +459,10 @@ def test_execute_installment_without_transaction_id(chf_event, order, monkeypatc
     )
     plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
     installment = make_installment(plan)
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment) is False
+    assert prov.execute_installment(plan, installment, payment) is False
     assert installment.failure_reason == "PostFinance transaction missing ID"
 
 
@@ -319,9 +480,10 @@ def test_installment_charged_in_the_space_that_issued_the_token(
     chf_event.settings.set("payment_postfinance_test_auth_key", "test-secret")
     plan = make_plan(chf_event, order, token={**STORED_TOKEN, "space_id": "54321"})
     installment = make_installment(plan)
+    payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment) is True
+    assert prov.execute_installment(plan, installment, payment) is True
     assert charge_calls["space_id"] == 54321
 
 
