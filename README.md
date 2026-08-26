@@ -129,7 +129,15 @@ Partial refunds are converted with that stored rate; a refund of the payment's
 full remaining amount returns what is left of the stored charge instead, so
 conversion rounding never leaves a cent behind or overshoots the transaction.
 The charged amount and rate are shown to the customer during checkout and to
-organizers in the order's payment details.
+organizers in the order's payment details, and each refund shows the amount
+PostFinance actually returned next to the transaction it was drawn on.
+
+Cancelling an order with a cancellation fee works through the same path: pretix
+sets the fee in the event currency and asks for a refund of the rest, which is
+converted at the payment's stored rate. What the customer effectively keeps
+paying is the charge minus that refund, so the fee is retained at the rate they
+paid at — give or take a cent of rounding, since the refund is what gets
+rounded, not the fee.
 
 ### Installment plans
 
