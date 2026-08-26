@@ -15,9 +15,9 @@
         {% if charged_amount %}
             <dt>{% trans "Refunded amount" %}</dt>
             <dd>{{ charged_amount }}
-                <em style="color: #666;">
+                <span class="help-block">
                     {% trans "returned to the customer in the currency the payment was charged in" %}
-                </em>
+                </span>
             </dd>
         {% endif %}
 
@@ -35,8 +35,8 @@
         {% endif %}
 
         {% if refund_info.error %}
-            <dt style="color: #c00;">{% trans "Error" %}</dt>
-            <dd style="color: #c00;">
+            <dt class="text-danger">{% trans "Error" %}</dt>
+            <dd class="text-danger">
                 {{ refund_info.error }}
                 {% if refund_info.error_code %} | Code: {{ refund_info.error_code }}{% endif %}
                 {% if refund_info.error_status_code %} | HTTP {{ refund_info.error_status_code }}{% endif %}
@@ -45,7 +45,7 @@
 
         {% if error_suggestion %}
             <dt></dt>
-            <dd><em style="color: #666;">{{ error_suggestion }}</em></dd>
+            <dd><em class="text-muted">{{ error_suggestion }}</em></dd>
         {% endif %}
     </dl>
 {% endif %}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -1671,3 +1672,23 @@ def test_prod_space_option_is_in_the_main_providers_settings(env):
     assert "prod_space_in_testmode" in fields
     assert fields["prod_space_in_testmode"].required is False
     assert PostFinanceProdSpacePaymentProvider(event).settings_form_fields == {}
+
+
+def test_control_templates_carry_no_inline_styles():
+    """pretix serves the control panel under `style-src 'self'`.
+
+    Inline `style=` attributes are silently dropped there, so a template
+    that colours an error red with one renders plain black. Bootstrap
+    classes are the only styling that survives.
+    """
+    templates = (
+        pathlib.Path(__file__).parent.parent
+        / "pretix_postfinance"
+        / "templates"
+        / "pretixplugins"
+        / "postfinance"
+    )
+    offenders = [
+        path.name for path in templates.glob("*.html") if 'style="' in path.read_text()
+    ]
+    assert not offenders
