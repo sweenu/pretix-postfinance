@@ -1,0 +1,33 @@
+# Translation of the pretix PostFinance Checkout plugin.
+# Copyright (C) the pretix-postfinance contributors
+# This file is distributed under the same license as the pretix-postfinance package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: pretix-postfinance\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-26 16:33+0000\n"
+"Last-Translator: pretix-postfinance contributors\n"
+"PO-Revision-Date: 2026-08-26 16:32+0000\n"
+"Language-Team: French\n"
+"Language: fr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+#: static/pretix_postfinance/pretix-postfinance.js:67
+msgid "Testing..."
+msgstr "Test en cours…"
+
+#: static/pretix_postfinance/pretix-postfinance.js:68
+msgid "Connection test failed. Please try again."
+msgstr "Le test de connexion a échoué. Veuillez réessayer."
+
+#: static/pretix_postfinance/pretix-postfinance.js:76
+msgid "Setting up..."
+msgstr "Configuration en cours…"
+
+#: static/pretix_postfinance/pretix-postfinance.js:77
+msgid "Webhook setup failed. Please try again."
+msgstr "La configuration du webhook a échoué. Veuillez réessayer."

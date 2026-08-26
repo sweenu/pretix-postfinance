@@ -12,6 +12,7 @@ PostFinance Checkout payment plugin for pretix.
 - **`pretix_postfinance/views.py`**: Admin views for capture/refund + webhook handler
 - **`pretix_postfinance/api.py`**: PostFinance Checkout SDK wrapper
 - **`pretix_postfinance/_types.py`**: Type definitions for pretix-specific types
+- **`pretix_postfinance/locale/`**: Message catalogs (de, fr, it, es)
 - **`tests/`**: pytest test suite
 
 ## Architecture
@@ -41,6 +42,28 @@ devenv shell -- uv run ty check pretix_postfinance/
 devenv shell -- uv run pytest tests/ -q -W ignore --cov=pretix_postfinance --cov-report=term-missing
 ```
 
+### Updating translations
+
+After adding or changing a user-facing string, re-extract both domains and
+translate the new entries (see README for the full workflow):
+
+```bash
+cd pretix_postfinance
+DJANGO_SETTINGS_MODULE=tests.settings PYTHONPATH=.. \
+    uv run django-admin makemessages -l de -l fr -l it -l es --no-obsolete
+DJANGO_SETTINGS_MODULE=tests.settings PYTHONPATH=.. \
+    uv run django-admin makemessages -d djangojs -l de -l fr -l it -l es --no-obsolete
+```
+
+Leave no entry empty or `#, fuzzy`, and verify with:
+
+```bash
+msgfmt --check --check-format --statistics -o /dev/null \
+    pretix_postfinance/locale/*/LC_MESSAGES/*.po
+```
+
+The `.mo` files are gitignored — `pretix-plugin-build` compiles them.
+
 ### Testing against the pretix fork
 
 The plugin supports two pretixes: the upstream release pinned in `uv.lock`,
@@ -64,6 +87,12 @@ CI runs both: the `test` job on upstream across Python 3.11-3.14, and the
 3. **Payment Info Storage**: Use `payment.info_data` dict for transaction/refund metadata
 4. **Error Handling**: Store `error_code` and `error_status_code` in info_data
 5. **Import Sorting**: stdlib -> third-party -> local (enforced by ruff)
+6. **Translations**: every user-facing string is wrapped in `gettext_lazy` (or
+   `{% trans %}`/`{% blocktrans %}` in templates, `gettext()` in JS) and
+   translated into de, fr, it and es. `xgettext` does not look inside
+   f-strings, so wrap the whole literal — `_("... {name} ...").format(...)`,
+   never `f"... {_('...')} ..."`. Webhook JSON responses go to PostFinance,
+   not to a person, and stay untranslated.
 
 ## Testing Strategy
 

@@ -269,7 +269,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         alone.
         """
         if self._prod_space_offered_in_testmode():
-            return f"{self._base_public_name} ({_('test space')})"
+            return _("{name} (test space)").format(name=self._base_public_name)
         return self._base_public_name
 
     def _get_payment_method_choices(self) -> list[tuple[str, str]]:
@@ -2418,7 +2418,7 @@ class PostFinanceProdSpacePaymentProvider(PostFinancePaymentProvider):
         Always suffixed with "(production space)" to distinguish it from the
         test space provider offered alongside it in test mode.
         """
-        return f"{self._base_public_name} ({_('production space')})"
+        return _("{name} (production space)").format(name=self._base_public_name)
 
     @property
     def test_mode_message(self) -> str:
