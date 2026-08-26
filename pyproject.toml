@@ -69,6 +69,18 @@ python-version = "3.11"
 [tool.ty.rules]
 all = "error"
 
+# Installments live in an app that only the EFCC pretix fork has, so this
+# module resolves them at runtime and reports "no installments" when the
+# import fails. Whichever pretix is installed, one of the two states is
+# wrong statically: on upstream the import cannot be resolved, and an
+# inline suppression for that would itself be unused on the fork. The file
+# is a handful of lines whose whole purpose is that optional import.
+[[tool.ty.overrides]]
+include = ["pretix_postfinance/installments.py"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+
 [[tool.ty.overrides]]
 include = ["pretix_postfinance/api.py"]
 
