@@ -2256,6 +2256,73 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         refund_id = info_data.get("refund_id")
         return str(refund_id) if refund_id else None
 
+    def _refund_charged_currency(self, refund: OrderRefund) -> str | None:
+        """
+        The currency a refund is booked in, when it is not the event's.
+
+        Returns ``None`` for a refund drawn on a payment charged in the event
+        currency, where pretix already shows the only amount there is.
+        """
+        payment = cast("OrderPayment | None", refund.payment)
+        if payment is None:
+            return None
+        charged_currency = str((payment.info_data or {}).get("charged_currency") or "")
+        if not charged_currency or charged_currency == self.event.currency:
+            return None
+        return charged_currency
+
+    def refund_control_render(self, request: HttpRequest, refund: OrderRefund) -> str:
+        """
+        Render refund details for the admin order view.
+
+        pretix keeps its books in the event currency, so a refund drawn on a
+        transaction charged in the alternative currency shows an amount that
+        is not the one PostFinance moved — and the order page and the
+        PostFinance dashboard end up showing two different numbers with
+        nothing linking them. Showing what was actually booked, next to the
+        transaction it was booked against, is what makes the two reconcile.
+        This matters most after a cancellation that keeps a fee: the fee is
+        set in the event currency, but what the customer really keeps paying
+        is the charge minus this refund.
+        """
+        info_data = refund.info_data or {}
+
+        charged_amount = None
+        charged_currency = self._refund_charged_currency(refund)
+        booked = info_data.get("amount")
+        if charged_currency and booked is not None:
+            charged_amount = money_filter(Decimal(str(booked)), charged_currency)
+
+        payment = cast("OrderPayment | None", refund.payment)
+        transaction_id = None
+        dashboard_url = None
+        if payment is not None:
+            transaction_id = (payment.info_data or {}).get("transaction_id")
+            space_id = info_data.get(SPACE_ID_KEY) or self._space_id_for_payment(payment)
+            if transaction_id and space_id:
+                dashboard_url = (
+                    f"https://checkout.postfinance.ch/s/{space_id}"
+                    f"/payment/transaction/view/{transaction_id}"
+                )
+
+        error_suggestion = None
+        error_status = info_data.get("error_status_code")
+        if error_status and int(error_status) in ERROR_STATUS_MESSAGES:
+            error_suggestion = ERROR_STATUS_MESSAGES[int(error_status)]
+
+        template = get_template("pretixplugins/postfinance/control_refund.html")
+        ctx = {
+            "request": request,
+            "event": self.event,
+            "refund": refund,
+            "refund_info": info_data,
+            "charged_amount": charged_amount,
+            "transaction_id": transaction_id,
+            "dashboard_url": dashboard_url,
+            "error_suggestion": error_suggestion,
+        }
+        return template.render(ctx)
+
     def refund_control_render_short(self, refund: OrderRefund) -> str:
         """
         Return a very short version of the refund method for admin lists.

@@ -1,0 +1,51 @@
+{% load i18n %}
+
+{% if refund_info %}
+    <dl class="dl-horizontal">
+        {% if refund_info.refund_id %}
+            <dt>{% trans "Refund ID" %}</dt>
+            <dd>{{ refund_info.refund_id }}</dd>
+        {% endif %}
+
+        {% if refund_info.state %}
+            <dt>{% trans "State" %}</dt>
+            <dd>{{ refund_info.state }}</dd>
+        {% endif %}
+
+        {% if charged_amount %}
+            <dt>{% trans "Refunded amount" %}</dt>
+            <dd>{{ charged_amount }}
+                <em style="color: #666;">
+                    {% trans "returned to the customer in the currency the payment was charged in" %}
+                </em>
+            </dd>
+        {% endif %}
+
+        {% if transaction_id %}
+            <dt>{% trans "Transaction ID" %}</dt>
+            <dd>
+                {% if dashboard_url %}
+                    <a href="{{ dashboard_url }}" target="_blank" rel="noopener noreferrer">
+                        {{ transaction_id }}
+                    </a>
+                {% else %}
+                    {{ transaction_id }}
+                {% endif %}
+            </dd>
+        {% endif %}
+
+        {% if refund_info.error %}
+            <dt style="color: #c00;">{% trans "Error" %}</dt>
+            <dd style="color: #c00;">
+                {{ refund_info.error }}
+                {% if refund_info.error_code %} | Code: {{ refund_info.error_code }}{% endif %}
+                {% if refund_info.error_status_code %} | HTTP {{ refund_info.error_status_code }}{% endif %}
+            </dd>
+        {% endif %}
+
+        {% if error_suggestion %}
+            <dt></dt>
+            <dd><em style="color: #666;">{{ error_suggestion }}</em></dd>
+        {% endif %}
+    </dl>
+{% endif %}

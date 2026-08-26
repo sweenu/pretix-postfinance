@@ -10,7 +10,7 @@ from postfinancecheckout.models import TransactionState
 from pretix.base.models import Order, OrderPayment, OrderRefund
 from pretix.base.payment import PaymentException
 
-from pretix_postfinance.payment import PostFinancePaymentProvider
+from pretix_postfinance.payment import ERROR_STATUS_MESSAGES, PostFinancePaymentProvider
 from pretix_postfinance.views import _process_transaction_webhook
 
 PAY_ALT_SESSION_KEY = "payment_postfinance_pay_alt"
@@ -648,6 +648,74 @@ def test_payment_presale_render_shows_charged_amount(alt_event, order):
 
     assert "12.43" in rendered
     assert "CHF" in rendered
+
+
+@pytest.mark.django_db
+def test_refund_control_render_shows_booked_charge(alt_event, order, rf):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    # 13.37 EUR was charged as 12.43 CHF; cancelling with a 3.00 EUR fee
+    # refunds 10.37 EUR, which PostFinance booked as 9.64 CHF.
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("10.37"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+        info=json.dumps({"refund_id": 789012, "state": "SUCCESSFUL", "amount": 9.64}),
+    )
+
+    rendered = provider.refund_control_render(rf.get("/"), refund)
+
+    assert "9.64" in rendered
+    assert "CHF" in rendered
+    assert "789012" in rendered
+    # The transaction the refund was drawn on, so the two reconcile
+    assert "123456" in rendered
+
+
+@pytest.mark.django_db
+def test_refund_control_render_omits_amount_for_event_currency(alt_event, order, rf):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order, fx=False)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("10.37"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+        info=json.dumps({"refund_id": 789012, "state": "SUCCESSFUL", "amount": 10.37}),
+    )
+
+    rendered = provider.refund_control_render(rf.get("/"), refund)
+
+    # pretix already shows the only amount there is; repeating it would
+    # just suggest a second, different one.
+    assert "Refunded amount" not in rendered
+    assert "789012" in rendered
+
+
+@pytest.mark.django_db
+def test_refund_control_render_shows_error(alt_event, order, rf):
+    provider = PostFinancePaymentProvider(alt_event)
+    payment = _paid_payment(order)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=Decimal("10.37"),
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_FAILED,
+        info=json.dumps(
+            {
+                "error": "Refund rejected",
+                "error_code": "INSUFFICIENT_FUNDS",
+                "error_status_code": 422,
+            }
+        ),
+    )
+
+    rendered = provider.refund_control_render(rf.get("/"), refund)
+
+    assert "Refund rejected" in rendered
+    assert "INSUFFICIENT_FUNDS" in rendered
+    assert str(ERROR_STATUS_MESSAGES[422]) in rendered
 
 
 # Shredding
