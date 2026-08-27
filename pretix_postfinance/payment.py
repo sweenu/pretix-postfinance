@@ -1119,7 +1119,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             ]
 
         if detailed_line_items and payment.amount == payment.order.total:
-            return self._build_line_items(
+            line_items = self._build_line_items(
                 {
                     "positions": payment.order.positions.filter(canceled=False).select_related(
                         "item", "variation"
@@ -1128,6 +1128,27 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "total": payment.amount,
                 },
                 payment.order.event.currency,
+            )
+            # PostFinance rejects a transaction whose line items do not sum to
+            # its amount. `order.total` is that sum by construction, but an
+            # order it does not hold for must still be payable, so fall back
+            # to the single aggregate line rather than sending something that
+            # cannot be accepted.
+            amounts = [getattr(item, "amount_including_tax", None) for item in line_items]
+            if any(amount is None for amount in amounts):
+                # Nothing to check against; send what was built, as before.
+                return line_items
+            itemised_total = sum(
+                (Decimal(str(amount)) for amount in amounts), Decimal("0.00")
+            )
+            if itemised_total == payment.amount:
+                return line_items
+            logger.warning(
+                "Itemised line items for payment %s sum to %s, not %s; "
+                "falling back to a single line item",
+                payment.pk,
+                itemised_total,
+                payment.amount,
             )
 
         return [
@@ -1374,7 +1395,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         try:
             fx = self._fx_from_request(request, payment)
             transaction_id, payment_page_url, space_id = self._create_payment_transaction(
-                payment, fx=fx
+                payment, detailed_line_items=True, fx=fx
             )
             self._set_session_transaction_id(request, payment, transaction_id)
             self._set_pending_transaction_id(payment, transaction_id, space_id, fx=fx)
@@ -1457,7 +1478,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 fx = self._fx_from_request(request, payment)
                 transaction_id, payment_page_url, space_id = self._create_payment_transaction(
                     payment,
-                    detailed_line_items=request.method == "GET",
+                    detailed_line_items=True,
                     fx=fx,
                 )
                 self._set_pending_transaction_id(payment, transaction_id, space_id, fx=fx)
