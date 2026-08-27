@@ -1741,3 +1741,104 @@ def test_execute_payment_failure_keeps_transaction_reference(
     assert payment.info_data["charged_currency"] == "CHF"
     assert payment.info_data["charged_amount"] == "14.44"
     assert prov.matching_id(payment) == 424242
+
+
+
+@pytest.mark.django_db
+def test_refund_external_id_is_scoped_to_the_organizer(env, monkeypatch, refund_factory):
+    """
+    PostFinance will not execute a second refund carrying an external ID it
+    has already seen. Event slugs are unique per organizer, not globally, so
+    an ID built without the organizer can collide between two organizers
+    sharing a space — and the second refund is quietly skipped.
+    """
+    event, order = env
+
+    seen = {}
+
+    def fake_refund(self, **kwargs):
+        seen.update(kwargs)
+        return refund_factory()
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction", fake_refund
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"transaction_id": 123456, "state": "FULFILL"}),
+        state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+    )
+    refund = order.refunds.create(
+        provider="postfinance",
+        payment=payment,
+        amount=order.total,
+        state=OrderRefund.REFUND_STATE_CREATED,
+    )
+
+    prov.execute_refund(refund)
+
+    assert seen["external_id"].startswith(f"pretix-{event.organizer.slug}-{event.slug}-")
+    assert event.organizer.slug in seen["external_id"]
+
+
+@pytest.mark.django_db
+def test_two_organizers_with_the_same_event_slug_do_not_collide(
+    organizer, testmode_organizer, monkeypatch, refund_factory
+):
+    """The collision the organizer segment exists to prevent."""
+    from datetime import timedelta
+
+    from django.utils.timezone import now
+    from pretix.base.models import Event, Order
+
+    ids = []
+
+    def fake_refund(self, **kwargs):
+        ids.append(kwargs["external_id"])
+        return refund_factory()
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction", fake_refund
+    )
+
+    for owner in (organizer, testmode_organizer):
+        event = Event.objects.create(
+            organizer=owner,
+            name="Annual",
+            slug="annual",
+            date_from=now(),
+            live=True,
+            plugins="pretix_postfinance",
+        )
+        event.settings.set("payment_postfinance_space_id", "12345")
+        event.settings.set("payment_postfinance_user_id", "67890")
+        event.settings.set("payment_postfinance_auth_key", "secret")
+        order = Order.objects.create(
+            code="SAMECODE",
+            event=event,
+            email="dummy@dummy.test",
+            status=Order.STATUS_PAID,
+            datetime=now(),
+            expires=now() + timedelta(days=10),
+            total=Decimal("10.00"),
+            sales_channel=owner.sales_channels.get(identifier="web"),
+        )
+        payment = order.payments.create(
+            provider="postfinance",
+            amount=order.total,
+            info=json.dumps({"transaction_id": 1, "state": "FULFILL"}),
+            state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+        )
+        refund = order.refunds.create(
+            provider="postfinance",
+            payment=payment,
+            amount=order.total,
+            state=OrderRefund.REFUND_STATE_CREATED,
+        )
+        PostFinancePaymentProvider(event).execute_refund(refund)
+
+    assert len(ids) == 2
+    assert ids[0] != ids[1]

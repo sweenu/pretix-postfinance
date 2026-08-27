@@ -2261,8 +2261,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         try:
             client = self._get_client_for_payment(payment)
 
-            # Generate a unique external ID for idempotency
-            external_id = f"pretix-{self.event.slug}-{refund.order.code}-R-{refund.local_id}"
+            # PostFinance will not execute a second refund carrying an
+            # external ID it has already seen, which is what makes retrying
+            # one safe. Event slugs are only unique within an organizer, so
+            # the organizer has to be part of the ID: without it two
+            # organizers sharing a space can produce the same one, and the
+            # second refund is quietly skipped rather than rejected.
+            external_id = (
+                f"pretix-{self.event.organizer.slug}-{self.event.slug}"
+                f"-{refund.order.code}-R-{refund.local_id}"
+            )
             merchant_reference = f"{self.event.slug}-{refund.order.code}"
 
             postfinance_refund = client.refund_transaction(
