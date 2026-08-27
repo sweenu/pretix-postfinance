@@ -93,12 +93,20 @@ rather than `f"... {_('...')} ..."`.
 
 ### Configuration
 
-Configure the plugin in your pretix settings with:
+Configure the plugin in the event's payment settings:
 
-- **Space ID**: Your PostFinance Checkout space ID
-- **User ID**: API user ID
-- **API Secret**: API authentication secret
-- **Environment**: `production` or `sandbox`
+- **Space ID**, **User ID**, **Authentication key**: the credentials of a
+  PostFinance Checkout application user, created under Account > Users >
+  Application Users. The authentication key is shown only once.
+- **Test space ID**, **Test user ID**, **Test authentication key**: optional
+  second set of credentials. When they are filled in, an event in test mode
+  charges through the test space; without them a test mode event charges
+  through the production space. There is no separate environment switch —
+  pretix's own test mode is what selects between the two.
+- **Display name** and **Description**: what customers see at checkout.
+- **Allowed payment methods**: restricts which of the space's payment methods
+  are offered. Save the credentials first, then reload the page to populate
+  the list.
 
 ## Features
 
