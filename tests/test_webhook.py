@@ -1183,3 +1183,102 @@ class TestWebhookFailurePreservesInfo:
         with scopes_disabled():
             payment.refresh_from_db()
         assert payment.info_data["transaction_id"] == 123456
+
+
+
+class TestWebhookSpaceLookup:
+    """
+    Signature validation needs credentials for the space a webhook came from,
+    and finding them must not depend on how many events an installation has.
+    """
+
+    @pytest.mark.django_db
+    def test_organizer_level_settings_are_found(self, organizer, event):
+        """
+        Hierarkey resolves an unset event setting from the organizer, so an
+        event configured at organizer level has no settings row of its own.
+        Before, only the unordered fallback scan could find it — which on an
+        installation with more than a hundred live events is a coin toss.
+        """
+        from pretix_postfinance.views import _events_for_space
+
+        for key in (
+            "payment_postfinance_space_id",
+            "payment_postfinance_user_id",
+            "payment_postfinance_auth_key",
+        ):
+            event.settings.delete(key)
+        organizer.settings.set("payment_postfinance_space_id", "55555")
+        organizer.settings.set("payment_postfinance_user_id", "67890")
+        organizer.settings.set("payment_postfinance_auth_key", "org-secret")
+
+        found = list(_events_for_space(55555))
+
+        assert event.pk in [e.pk for e in found]
+        # And it comes from the indexed lookup, not the bounded scan.
+        assert found[0].pk == event.pk
+
+    @pytest.mark.django_db
+    def test_event_level_settings_come_first(self, event):
+        from pretix_postfinance.views import _events_for_space
+
+        found = list(_events_for_space(12345))
+
+        assert found[0].pk == event.pk
+
+    @pytest.mark.django_db
+    def test_no_event_is_yielded_twice(self, organizer, event):
+        """An event matching at both levels must not be visited repeatedly."""
+        from pretix_postfinance.views import _events_for_space
+
+        organizer.settings.set("payment_postfinance_space_id", "12345")
+
+        found = [e.pk for e in _events_for_space(12345)]
+
+        assert found.count(event.pk) == 1
+
+    @pytest.mark.django_db
+    def test_the_fallback_scan_is_ordered(self, event):
+        """
+        Which events the last-resort scan covers has to be reproducible, or a
+        space configured somewhere the indexed queries cannot see is found
+        only intermittently.
+        """
+        from pretix_postfinance.views import _events_for_space
+
+        first = [e.pk for e in _events_for_space(77777)]
+        second = [e.pk for e in _events_for_space(77777)]
+
+        assert first == second
+        assert first == sorted(first)
+
+    @pytest.mark.django_db
+    def test_organizer_credentials_validate_the_signature(
+        self, organizer, event, client, monkeypatch
+    ):
+        """The end-to-end point of the lookup: the webhook is accepted."""
+        for key in (
+            "payment_postfinance_space_id",
+            "payment_postfinance_user_id",
+            "payment_postfinance_auth_key",
+        ):
+            event.settings.delete(key)
+        organizer.settings.set("payment_postfinance_space_id", "55555")
+        organizer.settings.set("payment_postfinance_user_id", "67890")
+        organizer.settings.set("payment_postfinance_auth_key", "org-secret")
+
+        checked = []
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.is_webhook_signature_valid",
+            lambda self, signature_header, content: checked.append(self.space_id) or True,
+        )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(313131, space_id=55555)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+        assert checked == [55555]
