@@ -9,6 +9,7 @@ code against the real models.
 
 from __future__ import annotations
 
+import pathlib
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -385,7 +386,9 @@ def test_execute_installment_without_token(chf_event, order):
 
     prov = PostFinancePaymentProvider(chf_event)
     assert prov.execute_installment(plan, installment, payment) is False
-    assert installment.failure_reason == "No payment token available"
+    assert installment.failure_reason == (
+        "No stored payment method is available for this plan."
+    )
 
 
 @pytest.mark.django_db
@@ -431,7 +434,9 @@ def test_execute_installment_records_pending_charge_as_failure(
 
     prov = PostFinancePaymentProvider(chf_event)
     assert prov.execute_installment(plan, installment, payment) is False
-    assert "not successful" in installment.failure_reason
+    assert installment.failure_reason == (
+        "The payment did not complete (PostFinance state: PENDING)."
+    )
 
 
 @pytest.mark.django_db
@@ -463,7 +468,9 @@ def test_execute_installment_without_transaction_id(chf_event, order, monkeypatc
 
     prov = PostFinancePaymentProvider(chf_event)
     assert prov.execute_installment(plan, installment, payment) is False
-    assert installment.failure_reason == "PostFinance transaction missing ID"
+    assert installment.failure_reason == (
+        "PostFinance did not return a transaction reference."
+    )
 
 
 @pytest.mark.django_db
@@ -525,3 +532,99 @@ def test_revoke_payment_token_survives_api_error(chf_event, order, monkeypatch):
     plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
 
     PostFinancePaymentProvider(chf_event).revoke_payment_token(plan)
+
+
+
+# The reasons `_fail_installment()` is given for a failure that is ours to
+# describe. PostFinance's own wording, where it supplies any, is passed
+# through untouched and so is deliberately absent from this list.
+TRANSLATABLE_FAILURE_REASONS = (
+    "No stored payment method is available for this plan.",
+    "PostFinance did not return a transaction reference.",
+    "The payment was declined by PostFinance.",
+    "The payment did not complete (PostFinance state: {state}).",
+    "The payment did not complete.",
+)
+
+
+@pytest.mark.parametrize("language", ["de", "fr", "it", "es"])
+@pytest.mark.parametrize("reason", TRANSLATABLE_FAILURE_REASONS)
+def test_failure_reasons_are_in_every_catalog(language, reason):
+    """
+    A failure reason is what pretix shows the customer and the organizer, so
+    it has to be translated like every other user-facing string here. The
+    `.mo` files are built by pretix-plugin-build and are not in the source
+    tree, so asserting the translated output at runtime is not possible —
+    what is checkable, and what actually goes wrong, is a string reaching the
+    code without reaching the catalogs.
+    """
+    catalog = pathlib.Path(
+        f"pretix_postfinance/locale/{language}/LC_MESSAGES/django.po"
+    ).read_text(encoding="utf-8")
+
+    assert f'msgid "{reason}"' in catalog, f"{reason!r} missing from the {language} catalog"
+
+    entry = catalog.split(f'msgid "{reason}"\n', 1)[1]
+    translated = entry.split("\n", 1)[0]
+    assert translated.startswith("msgstr ")
+    assert translated != 'msgstr ""', f"{reason!r} is untranslated in {language}"
+
+
+@pytest.mark.django_db
+def test_missing_token_reason_uses_the_translatable_wording(chf_event, order):
+    plan = make_plan(chf_event, order, token={})
+    installment = make_installment(plan)
+    payment = make_payment(order)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, payment) is False
+
+    assert installment.failure_reason == TRANSLATABLE_FAILURE_REASONS[0]
+    # The same reason reaches the payment, which is what pretix fails it with.
+    assert payment.info_data["error"] == installment.failure_reason
+
+
+@pytest.mark.django_db
+def test_postfinance_wording_is_passed_through(chf_event, order, monkeypatch, charge_calls):
+    """
+    Where PostFinance supplies its own reason it is used as it comes: it
+    describes the actual decline, which no wording of ours would improve on.
+    """
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.process_with_token",
+        lambda self, tid: SimpleNamespace(
+            state=ChargeState.FAILED,
+            failure_reason=SimpleNamespace(description="Insufficient funds"),
+            transaction=charged_transaction(state=TransactionState.FAILED),
+        ),
+    )
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan)
+    payment = make_payment(order)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, payment) is False
+
+    assert installment.failure_reason == "Insufficient funds"
+
+
+@pytest.mark.django_db
+def test_decline_without_a_reason_falls_back_to_our_wording(
+    chf_event, order, monkeypatch, charge_calls
+):
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.process_with_token",
+        lambda self, tid: SimpleNamespace(
+            state=ChargeState.FAILED,
+            failure_reason=None,
+            transaction=charged_transaction(state=TransactionState.FAILED),
+        ),
+    )
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan)
+    payment = make_payment(order)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, payment) is False
+
+    assert installment.failure_reason == "The payment was declined by PostFinance."

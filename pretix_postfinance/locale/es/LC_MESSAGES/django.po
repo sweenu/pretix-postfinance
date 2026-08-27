@@ -656,3 +656,23 @@ msgstr "No se ha encontrado el proveedor de pago de PostFinance."
 #: payment.py:364
 msgid "Configuration {id} (name unavailable)"
 msgstr "Configuración {id} (nombre no disponible)"
+
+#: payment.py
+msgid "No stored payment method is available for this plan."
+msgstr "No hay ningún método de pago guardado disponible para este plan."
+
+#: payment.py
+msgid "PostFinance did not return a transaction reference."
+msgstr "PostFinance no devolvió ninguna referencia de transacción."
+
+#: payment.py
+msgid "The payment was declined by PostFinance."
+msgstr "PostFinance rechazó el pago."
+
+#: payment.py
+msgid "The payment did not complete (PostFinance state: {state})."
+msgstr "El pago no se completó (estado de PostFinance: {state})."
+
+#: payment.py
+msgid "The payment did not complete."
+msgstr "El pago no se completó."

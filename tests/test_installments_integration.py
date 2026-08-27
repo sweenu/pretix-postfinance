@@ -549,7 +549,9 @@ def test_missing_token_leaves_the_plan_chargeable_by_hand(
     assert process_single_installment(installment) is False
     installment.refresh_from_db()
     assert installment.state == ScheduledInstallment.STATE_FAILED
-    assert installment.failure_reason == "No payment token available"
+    assert installment.failure_reason == (
+        "No stored payment method is available for this plan."
+    )
 
 
 @pytest.mark.django_db
