@@ -10,6 +10,7 @@ from postfinancecheckout.models import TransactionState
 from pretix.base.models import Order, OrderPayment, OrderRefund
 from pretix.base.payment import PaymentException
 
+from pretix_postfinance.api import PostFinanceError
 from pretix_postfinance.payment import ERROR_STATUS_MESSAGES, PostFinancePaymentProvider
 from pretix_postfinance.views import _process_transaction_webhook
 
@@ -786,3 +787,110 @@ def test_shredded_refund_keeps_the_amount_it_booked(alt_event, order):
         payment=payment,
     )
     assert provider._refund_transaction_amount(remainder) == Decimal("7.78")
+
+
+@pytest.mark.django_db
+def test_api_error_during_execute_payment_keeps_the_fx_snapshot(
+    env, rf, monkeypatch
+):
+    """
+    An error while checking on a transaction must not cost the payment its
+    FX snapshot. The customer has already been charged in the alternative
+    currency by then, and a payment that loses `charged_currency` looks like
+    a plain event-currency payment to `_refund_transaction_amount()` — which
+    would refund the event-currency amount out of a transaction booked in
+    another currency.
+    """
+    event, order = env
+    event.settings.set("payment_postfinance_alt_currency", "CHF")
+    event.settings.set("payment_postfinance_alt_currency_rate", "1.08")
+
+    def boom(self, tid):
+        raise PostFinanceError("upstream exploded", status_code=502)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction", boom
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.get("/")
+    req.session = {}
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps(
+            {
+                "pending_transaction_id": 515151,
+                "space_id": 12345,
+                "fx_rate": "1.08",
+                "fx_base_currency": "EUR",
+                "charged_currency": "CHF",
+                "charged_amount": "14.44",
+            }
+        ),
+    )
+
+    with pytest.raises(PaymentException):
+        prov.execute_payment(req, payment)
+
+    payment.refresh_from_db()
+    assert payment.info_data["charged_currency"] == "CHF"
+    assert payment.info_data["charged_amount"] == "14.44"
+    assert payment.info_data["fx_rate"] == "1.08"
+    assert payment.info_data["fx_base_currency"] == "EUR"
+    assert payment.info_data["transaction_id"] == 515151
+    assert payment.info_data["error_status_code"] == 502
+    # The provisional key is redundant once transaction_id is written.
+    assert "pending_transaction_id" not in payment.info_data
+
+
+@pytest.mark.django_db
+def test_refund_after_a_failed_status_check_still_converts(env, rf, monkeypatch):
+    """
+    The point of keeping the snapshot: the refund that follows such an error
+    must still be sent in the currency the transaction was booked in.
+    """
+    event, order = env
+    event.settings.set("payment_postfinance_alt_currency", "CHF")
+    event.settings.set("payment_postfinance_alt_currency_rate", "1.08")
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: (_ for _ in ()).throw(
+            PostFinanceError("upstream exploded", status_code=502)
+        ),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.get("/")
+    req.session = {}
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=Decimal("13.37"),
+        info=json.dumps(
+            {
+                "pending_transaction_id": 515151,
+                "space_id": 12345,
+                "fx_rate": "1.08",
+                "fx_base_currency": "EUR",
+                "charged_currency": "CHF",
+                "charged_amount": "14.44",
+            }
+        ),
+    )
+
+    with pytest.raises(PaymentException):
+        prov.execute_payment(req, payment)
+
+    payment.refresh_from_db()
+    refund = order.refunds.create(
+        provider="postfinance",
+        payment=payment,
+        amount=Decimal("5.00"),
+        state=OrderRefund.REFUND_STATE_CREATED,
+    )
+
+    # 5.00 EUR at the snapshotted rate, not 5.00 sent to a CHF transaction.
+    assert prov._refund_transaction_amount(refund) == Decimal("5.40")

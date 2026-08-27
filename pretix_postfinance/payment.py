@@ -1354,7 +1354,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "PostFinance API error during execute_payment transaction creation: %s",
                     e,
                 )
+                # Error details are added to what the payment already knows,
+                # never substituted for it. Replacing info_data wholesale
+                # drops the FX snapshot, and a payment charged in the
+                # alternative currency that loses it looks like a plain
+                # event-currency payment to `_refund_transaction_amount()` —
+                # which would then refund the event-currency amount out of a
+                # transaction booked in another currency.
                 payment.info_data = {
+                    **(payment.info_data or {}),
                     "error": str(e),
                     "error_code": e.error_code,
                     "error_status_code": e.status_code,
@@ -1365,7 +1373,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     user_message = ERROR_STATUS_MESSAGES[e.status_code]
                 raise PaymentException(str(user_message)) from e
             except PaymentException as e:
-                payment.info_data = {"error": str(e)}
+                payment.info_data = {**(payment.info_data or {}), "error": str(e)}
                 payment.save(update_fields=["info"])
                 raise
             except Exception as e:
@@ -1374,6 +1382,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     e,
                 )
                 payment.info_data = {
+                    **(payment.info_data or {}),
                     "error": str(e),
                     "error_code": type(e).__name__,
                 }
@@ -1472,6 +1481,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         except PostFinanceError as e:
             logger.exception("PostFinance API error during execute_payment: %s", e)
             payment.info_data = {
+                **{
+                    k: v
+                    for k, v in (payment.info_data or {}).items()
+                    if k != PENDING_TRANSACTION_ID_KEY
+                },
                 "transaction_id": transaction_id,
                 SPACE_ID_KEY: self._space_id_for_payment(payment),
                 "error": str(e),
@@ -1487,6 +1501,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         except Exception as e:
             logger.exception("Unexpected error during execute_payment: %s", e)
             payment.info_data = {
+                **{
+                    k: v
+                    for k, v in (payment.info_data or {}).items()
+                    if k != PENDING_TRANSACTION_ID_KEY
+                },
                 "transaction_id": transaction_id,
                 SPACE_ID_KEY: self._space_id_for_payment(payment),
                 "error": str(e),
