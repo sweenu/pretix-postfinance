@@ -233,3 +233,120 @@ def test_settings_form_clean_validates_required_credentials(
     message = str(excinfo.value)
     for expected_field in expected_fields:
         assert expected_field in message
+
+
+@pytest.mark.django_db
+def test_payment_method_choices_come_from_the_live_space(testmode_event, monkeypatch):
+    """
+    Payment method configuration IDs are scoped to a space. Reading them from
+    whichever space test mode points at means an organizer configuring a test
+    mode event saves test-space IDs, and every payment fails the day the event
+    goes live.
+    """
+    testmode_event.settings.set("payment_postfinance_test_space_id", "99999")
+    testmode_event.settings.set("payment_postfinance_test_user_id", "88888")
+    testmode_event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+    spaces = []
+
+    def fake_configs(self):
+        spaces.append(self.space_id)
+        return []
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_method_configurations",
+        fake_configs,
+    )
+
+    provider = PostFinancePaymentProvider(testmode_event)
+    provider._get_payment_method_choices()
+
+    assert spaces == [12345]
+
+
+@pytest.mark.django_db
+def test_allowed_methods_are_dropped_for_a_space_they_do_not_belong_to(event):
+    """
+    A list read from the production space names configurations the test space
+    has never heard of. Sending them would have the transaction rejected, so
+    the restriction is dropped and the charge goes ahead unrestricted.
+    """
+    event.settings.set("payment_postfinance_allowed_payment_methods", ["1", "2"])
+    event.settings.set("payment_postfinance_allowed_payment_methods_space", "12345")
+
+    provider = PostFinancePaymentProvider(event)
+
+    assert provider._parse_allowed_payment_methods(12345) == [1, 2]
+    assert provider._parse_allowed_payment_methods(99999) is None
+    # No space to compare against: the caller did not say, so apply the list.
+    assert provider._parse_allowed_payment_methods() == [1, 2]
+
+
+@pytest.mark.django_db
+def test_allowed_methods_without_a_recorded_space_are_still_applied(event):
+    """Lists saved before the space was recorded keep working."""
+    event.settings.set("payment_postfinance_allowed_payment_methods", ["7"])
+
+    provider = PostFinancePaymentProvider(event)
+
+    assert provider._parse_allowed_payment_methods(12345) == [7]
+
+
+@pytest.mark.django_db
+def test_settings_form_clean_records_the_space_of_the_saved_methods(event, monkeypatch):
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinancePaymentProvider._get_payment_method_choices",
+        lambda self: [("1", "Card")],
+    )
+    provider = PostFinancePaymentProvider(event)
+
+    cleaned = provider.settings_form_clean(
+        {
+            "_enabled": True,
+            "space_id": "12345",
+            "user_id": "67890",
+            "auth_key": "secret",
+            "allowed_payment_methods": ["1"],
+            "allowed_payment_methods_space": "not-this",
+        }
+    )
+    assert cleaned["allowed_payment_methods_space"] == "12345"
+
+    cleaned = provider.settings_form_clean(
+        {
+            "_enabled": True,
+            "space_id": "12345",
+            "user_id": "67890",
+            "auth_key": "secret",
+            "allowed_payment_methods": [],
+        }
+    )
+    assert cleaned["allowed_payment_methods_space"] == ""
+
+
+@pytest.mark.django_db
+def test_transaction_creation_passes_the_charging_space(env, monkeypatch, transaction_factory):
+    """The space actually being charged decides whether the list applies."""
+    event, order = env
+    event.settings.set("payment_postfinance_allowed_payment_methods", ["1", "2"])
+    event.settings.set("payment_postfinance_allowed_payment_methods_space", "12345")
+
+    seen = {}
+
+    def fake_create(self, **kwargs):
+        seen.update(kwargs)
+        return transaction_factory(id=1234)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction", fake_create
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: "https://example.test/pay",
+    )
+
+    provider = PostFinancePaymentProvider(event)
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+    provider._create_payment_transaction(payment)
+
+    assert seen["allowed_payment_method_configurations"] == [1, 2]
