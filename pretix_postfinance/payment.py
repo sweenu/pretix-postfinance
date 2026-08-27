@@ -86,6 +86,12 @@ TOKEN_ID_KEY = "token_id"
 # rather than one the customer made on the payment page.
 INSTALLMENT_CHARGE_KEY = "installment_charge"
 
+# info_data key naming the scheduled installment an automatic charge was made
+# for. pretix builds a fresh OrderPayment for every attempt, so this is what
+# ties the attempts at one installment together and lets a retry find out what
+# became of the transaction the attempt before it left behind.
+INSTALLMENT_ID_KEY = "installment_id"
+
 # info_data keys describing a payment charged in a different currency than
 # the event's. Written when a transaction is created, they snapshot the
 # conversion so refunds and displays use the rate the customer was charged
@@ -1846,6 +1852,113 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             payment.info_data = {**info, "error": reason}
         return False
 
+    def _previous_charge_attempt(
+        self, payment: OrderPayment, installment: Any
+    ) -> tuple[int, Any] | None:
+        """
+        Find the transaction a previous attempt at this installment left behind.
+
+        Returns ``(transaction_id, space_id)``, or ``None`` if this is the first
+        attempt. The space is whatever was recorded in ``info_data``, which is
+        untyped JSON — the callers only pass it back through, never arithmetic.
+
+        pretix builds a fresh ``OrderPayment`` for every attempt and re-points the
+        installment at it, so the earlier attempts are only reachable through the
+        order. They are recognised by the installment id recorded on them.
+        """
+        candidates = payment.order.payments.filter(
+            provider=self.identifier,
+            state__in=(
+                OrderPayment.PAYMENT_STATE_CREATED,
+                OrderPayment.PAYMENT_STATE_FAILED,
+            ),
+        ).exclude(pk=payment.pk).order_by("-pk")
+
+        for candidate in candidates:
+            info = candidate.info_data or {}
+            if info.get(INSTALLMENT_ID_KEY) != installment.pk:
+                continue
+            transaction_id = info.get("transaction_id")
+            if transaction_id:
+                return int(transaction_id), info.get(SPACE_ID_KEY)
+        return None
+
+    def _settled_by_previous_attempt(
+        self, payment: OrderPayment, installment: Any, client: PostFinanceClient
+    ) -> tuple[bool, dict[str, Any] | None, str | None]:
+        """
+        Decide whether a previous attempt at this installment already took the money.
+
+        A charge is two calls — create the transaction, then process it — and the
+        transaction id is recorded before the second one. So an attempt whose
+        response was lost after the money moved leaves behind a transaction that
+        PostFinance considers settled while pretix considers the attempt failed.
+        Charging again without looking would take the money twice.
+
+        Returns ``(handled, info, reason)``:
+
+        * ``(True, info, None)`` — it settled. Adopt that transaction instead of
+          creating another one; the money is already in.
+        * ``(True, None, reason)`` — it is neither settled nor dead yet, or could
+          not be checked. Charging now risks doubling, so report a failure and let
+          the next scheduled run look again.
+        * ``(False, None, None)`` — nothing in the way; charge normally.
+        """
+        previous = self._previous_charge_attempt(payment, installment)
+        if previous is None:
+            return (False, None, None)
+
+        transaction_id, space_id = previous
+        try:
+            transaction = client.get_transaction(transaction_id)
+        except PostFinanceError as e:
+            logger.warning(
+                "Could not check transaction %s from a previous attempt at "
+                "installment %s: %s",
+                transaction_id,
+                installment.pk,
+                e,
+            )
+            return (
+                True,
+                None,
+                str(_("An earlier payment attempt could not be checked.")),
+            )
+
+        state = getattr(transaction, "state", None)
+        if state in SUCCESS_STATES:
+            logger.warning(
+                "Installment %s was already paid by transaction %s from an earlier "
+                "attempt; adopting it instead of charging again",
+                installment.pk,
+                transaction_id,
+            )
+            info: dict[str, Any] = {
+                INSTALLMENT_CHARGE_KEY: True,
+                INSTALLMENT_ID_KEY: installment.pk,
+                "transaction_id": transaction_id,
+            }
+            if space_id is not None:
+                info[SPACE_ID_KEY] = space_id
+            info.update(self._transaction_info(transaction))
+            return (True, info, None)
+
+        if state in FAILURE_STATES:
+            return (False, None, None)
+
+        logger.info(
+            "Transaction %s from an earlier attempt at installment %s is still in "
+            "state %s; not charging again yet",
+            transaction_id,
+            installment.pk,
+            state,
+        )
+        return (
+            True,
+            None,
+            str(_("An earlier payment attempt is still being processed.")),
+        )
+
     def execute_installment(
         self, plan: Any, installment: Any, payment: OrderPayment
     ) -> bool:
@@ -1871,7 +1984,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         # Marks the payment as an automatic charge rather than something the
         # customer paid on the payment page. `store_installment_token` reads
         # it to know a webhook for this transaction cannot carry a new token.
-        info: dict[str, Any] = {INSTALLMENT_CHARGE_KEY: True}
+        info: dict[str, Any] = {
+            INSTALLMENT_CHARGE_KEY: True,
+            # Ties this attempt to the installment, so that if it dies without
+            # telling us what happened, the next one can find its transaction.
+            INSTALLMENT_ID_KEY: installment.pk,
+        }
         try:
             token_data = plan.payment_token or {}
             token_id = token_data.get("token_id")
@@ -1918,6 +2036,22 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             ]
 
             client = self._installment_token_client(plan)
+
+            # A charge is two calls, and the money moves on the second. An attempt
+            # whose response was lost in between leaves a transaction PostFinance
+            # considers settled and pretix considers failed, so ask what became of
+            # the last one before creating another.
+            handled, settled_info, reason = self._settled_by_previous_attempt(
+                payment, installment, client
+            )
+            if handled:
+                if settled_info is not None:
+                    payment.info_data = settled_info
+                    return True
+                return self._fail_installment(
+                    installment, payment, reason or "", info
+                )
+
             transaction = client.create_transaction(
                 currency=currency,
                 line_items=line_items,

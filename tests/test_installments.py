@@ -539,6 +539,8 @@ def test_revoke_payment_token_survives_api_error(chf_event, order, monkeypatch):
 # describe. PostFinance's own wording, where it supplies any, is passed
 # through untouched and so is deliberately absent from this list.
 TRANSLATABLE_FAILURE_REASONS = (
+    "An earlier payment attempt could not be checked.",
+    "An earlier payment attempt is still being processed.",
     "No stored payment method is available for this plan.",
     "PostFinance did not return a transaction reference.",
     "The payment was declined by PostFinance.",
