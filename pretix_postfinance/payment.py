@@ -1447,7 +1447,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                             str(_("Payment was successful but order confirmation failed."))
                         ) from e
             elif state in FAILURE_STATES:
-                payment.fail(info={"state": state.value if state else None})
+                # `fail()` assigns whatever it is given to info_data rather
+                # than merging it, so the transaction reference, the space and
+                # the FX snapshot only survive if they are passed back in.
+                payment.fail(
+                    info={**info_data, "state": state.value if state else None}
+                )
                 logger.info(
                     "Payment %s failed (PostFinance state: %s)",
                     payment.pk,
