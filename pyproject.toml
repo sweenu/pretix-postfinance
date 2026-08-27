@@ -56,9 +56,6 @@ build = "pretix_plugin_build.build:CustomBuild"
 [tool.setuptools]
 include-package-data = true
 
-[tool.setuptools.dynamic]
-version = {attr = "pretix_postfinance.__version__"}
-
 [tool.setuptools.packages.find]
 include = ["pretix*"]
 namespaces = false
