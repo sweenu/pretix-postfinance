@@ -547,6 +547,25 @@ TRANSLATABLE_FAILURE_REASONS = (
 )
 
 
+def _msgstr(entry: str) -> str:
+    """
+    The translation an entry carries, joined from however many lines it spans.
+
+    gettext wraps a long translation onto continuation lines after an empty
+    `msgstr ""`, so reading only the first line reports a perfectly good
+    translation as missing.
+    """
+    lines = entry.split("\n")
+    assert lines[0].startswith("msgstr ")
+    parts = [lines[0][len("msgstr ") :]]
+    for line in lines[1:]:
+        line = line.strip()
+        if not line.startswith('"'):
+            break
+        parts.append(line)
+    return "".join(part.strip().strip('"') for part in parts)
+
+
 @pytest.mark.parametrize("language", ["de", "fr", "it", "es"])
 @pytest.mark.parametrize("reason", TRANSLATABLE_FAILURE_REASONS)
 def test_failure_reasons_are_in_every_catalog(language, reason):
@@ -565,9 +584,7 @@ def test_failure_reasons_are_in_every_catalog(language, reason):
     assert f'msgid "{reason}"' in catalog, f"{reason!r} missing from the {language} catalog"
 
     entry = catalog.split(f'msgid "{reason}"\n', 1)[1]
-    translated = entry.split("\n", 1)[0]
-    assert translated.startswith("msgstr ")
-    assert translated != 'msgstr ""', f"{reason!r} is untranslated in {language}"
+    assert _msgstr(entry), f"{reason!r} is untranslated in {language}"
 
 
 @pytest.mark.django_db
@@ -579,7 +596,7 @@ def test_missing_token_reason_uses_the_translatable_wording(chf_event, order):
     prov = PostFinancePaymentProvider(chf_event)
     assert prov.execute_installment(plan, installment, payment) is False
 
-    assert installment.failure_reason == TRANSLATABLE_FAILURE_REASONS[0]
+    assert installment.failure_reason == "No stored payment method is available for this plan."
     # The same reason reaches the payment, which is what pretix fails it with.
     assert payment.info_data["error"] == installment.failure_reason
 
