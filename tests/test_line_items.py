@@ -212,3 +212,70 @@ class TestBuildLineItemsEdgeCases:
         assert unique_ids[1].startswith("position-")
         assert unique_ids[2].startswith("fee-")
         assert unique_ids[3].startswith("fee-")
+
+
+
+@pytest.mark.django_db
+class TestBuildLineItemsNegativeAmounts:
+    """
+    PostFinance rejects a negative line item unless it is typed DISCOUNT.
+    pretix puts no lower bound on an OrderFee — neither the add form nor the
+    change form in the control panel sets `min_value` — so an organizer
+    recording an ad-hoc discount as a negative fee is enough to produce one.
+    """
+
+    def test_negative_fee_is_a_discount(self, event):
+        prov = PostFinancePaymentProvider(event)
+
+        position = make_position("Concert Ticket", Decimal("50.00"))
+        discount = make_fee(Decimal("-5.00"), "other")
+        cart = {
+            "positions": [position],
+            "fees": [discount],
+            "total": Decimal("45.00"),
+        }
+
+        line_items = prov._build_line_items(cart, "CHF")
+
+        assert line_items[1].type == LineItemType.DISCOUNT
+        assert line_items[1].amount_including_tax == -5.0
+
+    def test_positive_fee_stays_a_fee(self, event):
+        prov = PostFinancePaymentProvider(event)
+
+        cart = {
+            "positions": [make_position("Ticket", Decimal("50.00"))],
+            "fees": [make_fee(Decimal("5.00"), "service")],
+            "total": Decimal("55.00"),
+        }
+
+        line_items = prov._build_line_items(cart, "CHF")
+
+        assert line_items[1].type == LineItemType.FEE
+
+    def test_negative_position_is_a_discount(self, event):
+        prov = PostFinancePaymentProvider(event)
+
+        cart = {
+            "positions": [make_position("Credit", Decimal("-10.00"))],
+            "fees": [],
+            "total": Decimal("-10.00"),
+        }
+
+        line_items = prov._build_line_items(cart, "CHF")
+
+        assert line_items[0].type == LineItemType.DISCOUNT
+
+    def test_the_items_still_sum_to_the_total(self, event):
+        """Typing them differently must not change what is charged."""
+        prov = PostFinancePaymentProvider(event)
+
+        cart = {
+            "positions": [make_position("Ticket", Decimal("50.00"))],
+            "fees": [make_fee(Decimal("-5.00"), "other")],
+            "total": Decimal("45.00"),
+        }
+
+        line_items = prov._build_line_items(cart, "CHF")
+
+        assert sum(item.amount_including_tax for item in line_items) == 45.0
