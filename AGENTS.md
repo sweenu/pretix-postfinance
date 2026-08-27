@@ -49,11 +49,19 @@ translate the new entries (see README for the full workflow):
 
 ```bash
 cd pretix_postfinance
-DJANGO_SETTINGS_MODULE=tests.settings PYTHONPATH=.. \
-    uv run django-admin makemessages -l de -l fr -l it -l es --no-obsolete
-DJANGO_SETTINGS_MODULE=tests.settings PYTHONPATH=.. \
-    uv run django-admin makemessages -d djangojs -l de -l fr -l it -l es --no-obsolete
+uv run django-admin makemessages -l de -l fr -l it -l es --no-obsolete
+uv run django-admin makemessages -d djangojs -l de -l fr -l it -l es --no-obsolete
 ```
+
+Run these **without** `DJANGO_SETTINGS_MODULE`. Extraction does not need
+settings — it scans the files under the current directory — and loading them
+does active harm when pretix is installed from a checkout: `tests/settings.py`
+inherits pretix's `LOCALE_PATHS`, `makemessages` treats every entry in it as
+somewhere it owns a temporary `.pot`, and its cleanup step deletes
+`django.pot` and `djangojs.pot` out of the pretix checkout. Those are real
+tracked files there, so the damage lands in a repository you were not even
+working in. Without settings the only locale directory in play is this
+plugin's, and the catalogs produced are byte-identical.
 
 Leave no entry empty or `#, fuzzy`, and verify with:
 
