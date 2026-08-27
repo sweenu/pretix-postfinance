@@ -109,6 +109,11 @@ PROD_PROVIDER_IDENTIFIER = "postfinance_prod"
 # payment option while in test mode. Off unless an organizer turns it on.
 PROD_SPACE_IN_TESTMODE_KEY = "prod_space_in_testmode"
 
+# Setting recording which space the saved `allowed_payment_methods` IDs were
+# read from. Payment method configuration IDs are scoped to a space, so a list
+# collected in one space means nothing in the other.
+ALLOWED_METHODS_SPACE_KEY = "allowed_payment_methods_space"
+
 # All provider identifiers used by this plugin. Payments and refunds may be
 # stored under any of these.
 PROVIDER_IDENTIFIERS = (MAIN_PROVIDER_IDENTIFIER, PROD_PROVIDER_IDENTIFIER)
@@ -276,16 +281,22 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Fetch available payment method configurations from PostFinance.
 
+        Always read from the production space, whatever mode the event is in.
+        Configuration IDs are scoped to a space, and the saved list is what
+        real charges are restricted by, so collecting it anywhere else would
+        put IDs into the setting that the production space does not know —
+        and every payment would fail the moment the event goes live.
+
         Returns a list of (id, name) tuples for use in a MultipleChoiceField.
         Returns an empty list if credentials are not configured or API call fails.
         """
-        space_id, user_id, auth_key = self._get_credentials()
+        space_id, user_id, auth_key = self._get_credentials_for_mode("live")
 
         if not all([space_id, user_id, auth_key]):
             return []
 
         try:
-            client = self._get_client()
+            client = self._get_client_for_mode("live")
             configs = client.get_payment_method_configurations()
             choices = []
             for config in configs:
@@ -309,9 +320,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             logger.warning("Failed to fetch payment method configurations", exc_info=True)
             return []
 
-    def _parse_allowed_payment_methods(self) -> list[int] | None:
+    def _parse_allowed_payment_methods(self, space_id: int | None = None) -> list[int] | None:
         """
-        Parse the allowed_payment_methods setting.
+        Parse the allowed_payment_methods setting for the space being charged.
+
+        The saved IDs belong to the space they were read from, which is
+        recorded alongside them. Sending them to a different space would name
+        configurations it has never heard of and the transaction would be
+        rejected, so a list that does not belong to `space_id` is dropped and
+        the charge goes ahead unrestricted rather than failing outright.
 
         Returns:
             List of payment method configuration IDs, or None if all methods allowed.
@@ -319,6 +336,17 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         allowed_methods = self.settings.get("allowed_payment_methods", as_type=list)
 
         if not allowed_methods:
+            return None
+
+        recorded_space = self.settings.get(ALLOWED_METHODS_SPACE_KEY)
+        if space_id is not None and recorded_space and str(recorded_space) != str(space_id):
+            logger.warning(
+                "Ignoring allowed_payment_methods for event %s: the list belongs to "
+                "space %s but the transaction is being created in space %s",
+                self.event.slug,
+                recorded_space,
+                space_id,
+            )
             return None
 
         try:
@@ -449,6 +477,13 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     ),
                 ),
                 (
+                    ALLOWED_METHODS_SPACE_KEY,
+                    forms.CharField(
+                        required=False,
+                        widget=forms.HiddenInput,
+                    ),
+                ),
+                (
                     "allowed_payment_methods",
                     forms.MultipleChoiceField(
                         label=_("Allowed payment methods"),
@@ -523,6 +558,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "this payment provider: {fields}"
                 ).format(fields=", ".join(missing))
                 raise ValidationError(msg)
+
+        # The choice list is read from the production space, so that is the
+        # space the saved IDs belong to. Set it here rather than trusting what
+        # the hidden field came back with.
+        if cleaned_data.get("allowed_payment_methods"):
+            cleaned_data[ALLOWED_METHODS_SPACE_KEY] = str(cleaned_data.get("space_id") or "")
+        else:
+            cleaned_data[ALLOWED_METHODS_SPACE_KEY] = ""
 
         if cleaned_data.get("alt_currency") and not cleaned_data.get("alt_currency_rate"):
             raise ValidationError(
@@ -1142,7 +1185,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 payment.order.code,
                 installment_number=installment_number,
             ),
-            allowed_payment_method_configurations=self._parse_allowed_payment_methods(),
+            allowed_payment_method_configurations=self._parse_allowed_payment_methods(
+                client.space_id
+            ),
             tokenization_mode=tokenization_mode,
             customer_email_address=payment.order.email,
             billing_address=self._build_transaction_billing_address(payment),
