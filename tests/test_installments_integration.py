@@ -549,9 +549,10 @@ def test_missing_token_leaves_the_plan_chargeable_by_hand(
     assert process_single_installment(installment) is False
     installment.refresh_from_db()
     assert installment.state == ScheduledInstallment.STATE_FAILED
-    assert installment.failure_reason == (
-        "No stored payment method is available for this plan."
-    )
+    # pretix's own wording, not the provider's: with no token on the plan it
+    # never gets as far as calling `execute_installment()`. The provider's
+    # reason for the same situation is covered in `test_installments.py`.
+    assert installment.failure_reason == "No payment token available"
 
 
 @pytest.mark.django_db
