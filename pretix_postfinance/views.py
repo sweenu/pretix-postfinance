@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, Literal
 
 from django.db.models import Q, QuerySet
@@ -227,32 +227,60 @@ def _mode_for_space(event: Any, space_id: int) -> Literal["live", "test"] | None
     return None
 
 
-def _events_for_space(space_id: int) -> list[Event]:
-    """
-    Return events that may be configured with the given space.
+SPACE_SETTING_KEYS = (
+    "payment_postfinance_space_id",
+    "payment_postfinance_test_space_id",
+)
 
-    Looks the space up in the settings store first, so the lookup does not
-    depend on how many events an installation has. Events that inherit their
-    settings from the organizer have no row of their own, so a bounded scan
-    of live and test mode events is appended as a fallback.
+
+def _events_for_space(space_id: int) -> Iterator[Event]:
     """
-    indexed = list(
+    Yield events that may be configured with the given space, best guess first.
+
+    Both settings levels are looked up in the settings store, so the lookup
+    does not depend on how many events an installation has:
+
+    1. Events carrying the space in their own settings.
+    2. Events whose organizer carries it. Hierarkey resolves an unset event
+       setting from the organizer, so an event configured at organizer level
+       has no row of its own and is invisible to the first query — which used
+       to leave the scan below as the only way to find it.
+
+    A bounded scan of live and test mode events remains as a last resort, for
+    a space configured somewhere neither query reaches. It is ordered so that
+    which events it covers is at least reproducible, and being a generator it
+    is never queried at all while an earlier step produces a usable client.
+
+    Candidates are only candidates: `_mode_for_space()` re-reads the resolved
+    settings and drops the ones that do not really carry this space.
+    """
+    value = str(space_id)
+    seen: set[int] = set()
+
+    def _new(queryset: QuerySet) -> Iterator[Event]:
+        for event in queryset.only("id", "slug"):
+            if event.pk not in seen:
+                seen.add(event.pk)
+                yield event
+
+    yield from _new(
         Event.objects.filter(
-            _settings_objects__key__in=(
-                "payment_postfinance_space_id",
-                "payment_postfinance_test_space_id",
-            ),
-            _settings_objects__value=str(space_id),
-        )
-        .only("id", "slug")
-        .distinct()
+            _settings_objects__key__in=SPACE_SETTING_KEYS,
+            _settings_objects__value=value,
+        ).distinct()
     )
-    scanned = (
+    yield from _new(
+        Event.objects.filter(
+            organizer___settings_objects__key__in=SPACE_SETTING_KEYS,
+            organizer___settings_objects__value=value,
+        ).distinct()
+    )
+    yield from _new(
         Event.objects.filter(Q(live=True) | Q(testmode=True))
-        .exclude(pk__in=[e.pk for e in indexed])
-        .only("id", "slug")[:100]
+        # A snapshot, not the live set: `_new()` adds to it as it yields.
+        .exclude(pk__in=list(seen))
+        .order_by("pk")[:100]
     )
-    return indexed + list(scanned)
 
 
 def _get_client_for_space(space_id: int) -> PostFinanceClient | None:
