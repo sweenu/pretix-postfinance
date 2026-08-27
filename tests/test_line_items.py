@@ -4,7 +4,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
-from postfinancecheckout.models import LineItemType
+from postfinancecheckout.models import LineItemCreate, LineItemType
 
 from pretix_postfinance.payment import PostFinancePaymentProvider
 
@@ -279,3 +279,79 @@ class TestBuildLineItemsNegativeAmounts:
         line_items = prov._build_line_items(cart, "CHF")
 
         assert sum(item.amount_including_tax for item in line_items) == 45.0
+
+
+
+@pytest.mark.django_db
+class TestItemisationIsUnconditional:
+    """
+    Whether the customer's PostFinance page itemised their tickets used to
+    come down to the HTTP verb of the request that happened to trigger the
+    redirect, and a retry through `payment_prepare()` never itemised at all.
+    """
+
+    @pytest.mark.django_db
+    def test_post_and_get_produce_the_same_line_items(
+        self, env, rf, monkeypatch, transaction_factory
+    ):
+        event, order = env
+        item = event.items.create(name="Ticket", default_price=Decimal("13.37"))
+        order.positions.create(item=item, price=Decimal("13.37"), positionid=1)
+
+        seen = []
+
+        def fake_create(self, **kwargs):
+            seen.append(kwargs["line_items"])
+            return transaction_factory(id=1)
+
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinanceClient.create_transaction", fake_create
+        )
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+            lambda self, tid: "https://example.test/pay",
+        )
+
+        prov = PostFinancePaymentProvider(event)
+        for request in (rf.get("/"), rf.post("/", {"payment": "postfinance"})):
+            request.session = {}
+            payment = order.payments.create(provider="postfinance", amount=order.total)
+            prov.execute_payment(request, payment)
+
+        assert len(seen) == 2
+        assert [i.name for i in seen[0]] == [i.name for i in seen[1]]
+        assert seen[0][0].name == "Ticket"
+
+    @pytest.mark.django_db
+    def test_line_items_that_do_not_sum_fall_back_to_one_line(
+        self, env, monkeypatch
+    ):
+        """
+        PostFinance rejects a transaction whose line items do not add up to
+        its amount, so an order where they do not must still be payable.
+        """
+        event, order = env
+
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider._build_line_items",
+            lambda self, cart, currency: [
+                LineItemCreate(
+                    name="Wrong",
+                    quantity=1,
+                    amountIncludingTax=1.0,
+                    type=LineItemType.PRODUCT,
+                    uniqueId="wrong",
+                )
+            ],
+        )
+
+        prov = PostFinancePaymentProvider(event)
+        payment = order.payments.create(provider="postfinance", amount=order.total)
+
+        line_items = prov._build_payment_transaction_line_items(
+            payment, detailed_line_items=True
+        )
+
+        assert len(line_items) == 1
+        assert line_items[0].amount_including_tax == float(order.total)
+        assert line_items[0].unique_id == f"payment-{payment.pk}"
