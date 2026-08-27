@@ -125,6 +125,21 @@ METHOD_CHOICES_CACHE_TIMEOUT = 300
 PROVIDER_IDENTIFIERS = (MAIN_PROVIDER_IDENTIFIER, PROD_PROVIDER_IDENTIFIER)
 
 
+def _line_item_type(amount: Decimal, positive_type: LineItemType) -> LineItemType:
+    """
+    Pick the line item type PostFinance will accept for this amount.
+
+    PostFinance requires a negative line item to be a DISCOUNT and rejects the
+    transaction outright otherwise. pretix puts no lower bound on an
+    `OrderFee`, so an organizer entering a negative fee in the order change
+    form — the usual way to record an ad-hoc discount — is enough to produce
+    one.
+    """
+    if amount < 0:
+        return LineItemType.DISCOUNT
+    return positive_type
+
+
 class PostFinancePaymentProvider(BasePaymentProvider):
     """
     PostFinance Checkout payment provider for pretix.
@@ -1295,7 +1310,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     name=item_name,
                     quantity=float(quantity),
                     amountIncludingTax=float(price),
-                    type=LineItemType.PRODUCT,
+                    type=_line_item_type(price, LineItemType.PRODUCT),
                     uniqueId=f"position-{idx}-{position.item.pk}",
                 )
             )
@@ -1322,7 +1337,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     name=fee_name,
                     quantity=1,
                     amountIncludingTax=float(fee_value),
-                    type=LineItemType.FEE,
+                    type=_line_item_type(fee_value, LineItemType.FEE),
                     uniqueId=f"fee-{idx}",
                 )
             )
