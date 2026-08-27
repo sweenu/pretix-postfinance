@@ -641,8 +641,10 @@ class PostFinanceClient:
         Args:
             name: A name for this webhook listener.
             webhook_url_id: The ID of the webhook URL to use.
-            entity_id: The entity type ID to listen for.
-                Common values: 1472041829003 (Transaction), 1472041816898 (Refund)
+            entity_id: The entity type ID to listen for. Use the module
+                constants `TRANSACTION_ENTITY_ID` and `REFUND_ENTITY_ID`
+                rather than repeating the literals here — a second copy of
+                an ID is a second thing that can be wrong.
             entity_states: List of entity state names to trigger on
                 (e.g., ["AUTHORIZED", "COMPLETED"]).
 
