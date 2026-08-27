@@ -4,11 +4,15 @@ from typing import Any
 
 from django.dispatch import receiver
 from django.template.loader import get_template
-from django.urls import resolve
+from django.urls import Resolver404, resolve
 from django.utils.translation import gettext_lazy as _
 from pretix.base.logentrytypes import OrderLogEntryType, log_entry_types
 from pretix.base.signals import register_payment_providers
 from pretix.control.signals import html_head
+
+# The control panel view that renders one payment provider's settings, which
+# is the only page carrying the buttons the script wires up.
+PROVIDER_SETTINGS_URL_NAME = "event.settings.payment.provider"
 
 
 @log_entry_types.new()
@@ -63,11 +67,27 @@ def register_payment_provider(sender: Any, **kwargs: Any) -> list[type[Any]]:
 @receiver(html_head, dispatch_uid="postfinance_control_html_head")
 def control_html_head(sender: Any, request: Any, **kwargs: Any) -> str:
     """
-    Inject PostFinance JavaScript into control panel pages.
+    Load the settings page JavaScript, on that page only.
+
+    The script drives the "Test connection" and "Setup webhooks" buttons,
+    which only `settings_content_render()` puts on the page, and only for the
+    main provider — the production space provider shares its settings and
+    renders none of its own. Matching every control URL whose name merely
+    contains "settings" served it on pages with nothing to put it to use.
     """
-    url = resolve(request.path_info)
-    # Only load on payment settings page
-    if url.url_name and "settings" in url.url_name:
+    # Imported lazily, like the provider registration above: this module is
+    # imported from `AppConfig.ready()`.
+    from .payment import MAIN_PROVIDER_IDENTIFIER
+
+    try:
+        url = resolve(request.path_info)
+    except Resolver404:
+        return ""
+
+    if (
+        url.url_name == PROVIDER_SETTINGS_URL_NAME
+        and url.kwargs.get("provider") == MAIN_PROVIDER_IDENTIFIER
+    ):
         template = get_template("pretixplugins/postfinance/control_head.html")
         return template.render()
     return ""
