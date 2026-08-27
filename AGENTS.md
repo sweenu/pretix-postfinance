@@ -83,11 +83,11 @@ CI runs both: the `test` job on upstream across Python 3.11-3.14, and the
 
 ## Important Conventions
 
-2. **Type Hints**: use `PretixHttpRequest` for views
-3. **Payment Info Storage**: Use `payment.info_data` dict for transaction/refund metadata
-4. **Error Handling**: Store `error_code` and `error_status_code` in info_data
-5. **Import Sorting**: stdlib -> third-party -> local (enforced by ruff)
-6. **Translations**: every user-facing string is wrapped in `gettext_lazy` (or
+1. **Type Hints**: use `PretixHttpRequest` for views
+2. **Payment Info Storage**: Use `payment.info_data` dict for transaction/refund metadata
+3. **Error Handling**: Store `error_code` and `error_status_code` in info_data
+4. **Import Sorting**: stdlib -> third-party -> local (enforced by ruff)
+5. **Translations**: every user-facing string is wrapped in `gettext_lazy` (or
    `{% trans %}`/`{% blocktrans %}` in templates, `gettext()` in JS) and
    translated into de, fr, it and es. `xgettext` does not look inside
    f-strings, so wrap the whole literal — `_("... {name} ...").format(...)`,
@@ -103,9 +103,11 @@ CI runs both: the `test` job on upstream across Python 3.11-3.14, and the
 ## CI/CD
 
 GitHub workflow runs on PRs:
-- **test**: pytest with coverage (Python 3.9-3.14)
-- **coverage-diff**: Shows coverage change in PR comments
-- **typecheck**: mypy strict type checking
+- **test**: pytest with coverage on the pinned upstream pretix (Python 3.11-3.14)
+- **test (pretix fork)**: the same suite against `the-efcc/pretix`, and fails if
+  any test skips itself (see "Testing against the pretix fork" above)
+- **coverage-diff**: writes the coverage change to the job summary
+- **typecheck**: `ty check` (`[tool.ty]` in `pyproject.toml`; not mypy)
 - **lint**: ruff linting
 
 ## Type System Notes
