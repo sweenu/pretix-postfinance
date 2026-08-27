@@ -635,10 +635,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         # The choice list is read from the production space, so that is the
         # space the saved IDs belong to. Set it here rather than trusting what
         # the hidden field came back with.
-        if cleaned_data.get("allowed_payment_methods"):
-            cleaned_data[ALLOWED_METHODS_SPACE_KEY] = str(cleaned_data.get("space_id") or "")
-        else:
-            cleaned_data[ALLOWED_METHODS_SPACE_KEY] = ""
+        if "allowed_payment_methods" in cleaned_data:
+            cleaned_data[ALLOWED_METHODS_SPACE_KEY] = (
+                str(cleaned_data.get("space_id") or "")
+                if cleaned_data["allowed_payment_methods"]
+                else ""
+            )
 
         if cleaned_data.get("alt_currency") and not cleaned_data.get("alt_currency_rate"):
             raise ValidationError(
