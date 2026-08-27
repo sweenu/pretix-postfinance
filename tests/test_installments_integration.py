@@ -27,6 +27,7 @@ from pretix.base.services.installments import (
 )
 from pretix.efcc.models import InstallmentPlan, ScheduledInstallment
 
+from pretix_postfinance.api import PostFinanceError
 from pretix_postfinance.payment import PostFinancePaymentProvider
 from pretix_postfinance.views import _process_transaction_webhook
 
@@ -86,6 +87,9 @@ def postfinance(monkeypatch):
     """
     api = SimpleNamespace(
         transactions=[], revoked=[], refunds=[], decline=None,
+        # When set, the charge call dies after the money has moved -- the
+        # transaction exists and is settled, but we never hear the answer.
+        lose_response=False,
         transaction=fulfilled_transaction(),
     )
 
@@ -106,6 +110,8 @@ def postfinance(monkeypatch):
         lambda self, tid: api.transaction,
     )
     def process_with_token(self, tid):
+        if api.lose_response:
+            raise PostFinanceError("gateway timeout", status_code=504)
         if api.decline is not None:
             return SimpleNamespace(
                 state=ChargeState.FAILED,
@@ -573,3 +579,153 @@ def test_cancelling_a_plan_revokes_the_token(
         ScheduledInstallment.STATE_PAID,
         ScheduledInstallment.STATE_CANCELLED,
     }
+
+
+@pytest.mark.django_db
+class TestALostResponseIsNotChargedTwice:
+    """
+    A charge is two calls to PostFinance and the money moves on the second. If
+    the response to that second call is lost, the transaction is settled at
+    PostFinance while pretix records the attempt as failed -- and pretix retries
+    failed installments. Without a check, the retry takes the money again.
+    """
+
+    def _plan_with_a_lost_charge(self, event, order, pay_first_installment, postfinance):
+        """Charge installment 2, losing the response after the money moved."""
+        plan = create_installment_plan(order, "postfinance", 3)
+        pay_first_installment(event, first_payment_of(plan))
+
+        postfinance.lose_response = True
+        assert process_single_installment(due(plan, 2)) is False
+        postfinance.lose_response = False
+
+        failed = due(plan, 2).payment
+        assert failed.state == OrderPayment.PAYMENT_STATE_FAILED
+        assert failed.info_data["transaction_id"]
+        return plan, failed
+
+    def test_the_retry_adopts_the_charge_instead_of_repeating_it(
+        self, installments_event, installments_order, pay_first_installment, postfinance
+    ):
+        plan, failed = self._plan_with_a_lost_charge(
+            installments_event, installments_order, pay_first_installment, postfinance
+        )
+        lost_transaction_id = failed.info_data["transaction_id"]
+
+        # At PostFinance the charge did go through.
+        postfinance.transaction = SimpleNamespace(
+            id=lost_transaction_id,
+            state=TransactionState.FULFILL,
+            payment_connector_configuration=SimpleNamespace(name="TWINT"),
+            created_on="2026-01-13T10:00:00Z",
+        )
+        before = len(postfinance.token_charges())
+
+        assert process_single_installment(due(plan, 2)) is True
+
+        assert len(postfinance.token_charges()) == before, "charged a second time"
+
+        installment = due(plan, 2)
+        assert installment.state == ScheduledInstallment.STATE_PAID
+        assert installment.payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+        # The confirmed payment names the transaction that actually took the
+        # money, so it can be reconciled and refunded.
+        assert installment.payment.info_data["transaction_id"] == lost_transaction_id
+
+        plan.refresh_from_db()
+        assert plan.installments_paid == 2
+
+        installments_order.refresh_from_db()
+        assert installments_order.pending_sum == Decimal("100.00")
+
+    def test_a_charge_that_really_failed_is_retried(
+        self, installments_event, installments_order, pay_first_installment, postfinance
+    ):
+        """The guard must not turn a genuine decline into an uncollectable plan."""
+        plan, failed = self._plan_with_a_lost_charge(
+            installments_event, installments_order, pay_first_installment, postfinance
+        )
+        postfinance.transaction = SimpleNamespace(
+            id=failed.info_data["transaction_id"],
+            state=TransactionState.FAILED,
+            payment_connector_configuration=None,
+            created_on=None,
+        )
+        before = len(postfinance.token_charges())
+
+        assert process_single_installment(due(plan, 2)) is True
+
+        assert len(postfinance.token_charges()) == before + 1
+        assert due(plan, 2).state == ScheduledInstallment.STATE_PAID
+
+    def test_an_attempt_still_in_flight_is_left_alone(
+        self, installments_event, installments_order, pay_first_installment, postfinance
+    ):
+        """A transaction that may yet settle must not be charged alongside."""
+        plan, failed = self._plan_with_a_lost_charge(
+            installments_event, installments_order, pay_first_installment, postfinance
+        )
+        postfinance.transaction = SimpleNamespace(
+            id=failed.info_data["transaction_id"],
+            state=TransactionState.PROCESSING,
+            payment_connector_configuration=None,
+            created_on=None,
+        )
+        before = len(postfinance.token_charges())
+
+        assert process_single_installment(due(plan, 2)) is False
+
+        assert len(postfinance.token_charges()) == before, "charged while one was in flight"
+        installment = due(plan, 2)
+        assert installment.state == ScheduledInstallment.STATE_FAILED
+        assert installment.failure_reason == "An earlier payment attempt is still being processed."
+
+    def test_an_uncheckable_attempt_is_left_alone(
+        self, installments_event, installments_order, pay_first_installment,
+        postfinance, monkeypatch,
+    ):
+        """If we cannot find out what happened, charging again is the wrong guess."""
+        plan, _failed = self._plan_with_a_lost_charge(
+            installments_event, installments_order, pay_first_installment, postfinance
+        )
+        def unreachable(self, tid):
+            raise PostFinanceError("service unavailable", status_code=503)
+
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinanceClient.get_transaction", unreachable
+        )
+        before = len(postfinance.token_charges())
+
+        assert process_single_installment(due(plan, 2)) is False
+
+        assert len(postfinance.token_charges()) == before
+        assert due(plan, 2).failure_reason == "An earlier payment attempt could not be checked."
+
+    def test_a_first_attempt_is_not_held_up_by_the_check(
+        self, installments_event, installments_order, pay_first_installment, postfinance
+    ):
+        """The guard only looks at earlier attempts at the same installment."""
+        plan = create_installment_plan(installments_order, "postfinance", 3)
+        pay_first_installment(installments_event, first_payment_of(plan))
+        before = len(postfinance.token_charges())
+
+        assert process_single_installment(due(plan, 2)) is True
+
+        assert len(postfinance.token_charges()) == before + 1
+        assert due(plan, 2).state == ScheduledInstallment.STATE_PAID
+
+    def test_a_later_installment_is_not_confused_with_an_earlier_failure(
+        self, installments_event, installments_order, pay_first_installment, postfinance
+    ):
+        """Attempts are matched by installment, not merely by order."""
+        plan, _failed = self._plan_with_a_lost_charge(
+            installments_event, installments_order, pay_first_installment, postfinance
+        )
+        before = len(postfinance.token_charges())
+
+        # Installment 3 has no history of its own and must charge normally,
+        # even though installment 2 left a failed attempt on the same order.
+        assert process_single_installment(due(plan, 3)) is True
+
+        assert len(postfinance.token_charges()) == before + 1
+        assert due(plan, 3).state == ScheduledInstallment.STATE_PAID
