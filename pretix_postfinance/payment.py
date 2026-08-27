@@ -1798,7 +1798,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         The reason goes on the installment, which is what pretix shows the
         customer and the organizer, and on the payment, which pretix marks
-        failed with whatever we leave in ``info_data``.
+        failed with whatever we leave in ``info_data``. Being customer-facing,
+        the reasons passed in here are translated — except where PostFinance
+        supplies its own wording, which is passed through as it comes.
         """
         installment.failure_reason = reason
         installment.save(update_fields=["failure_reason"])
@@ -1842,7 +1844,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     plan.order.code,
                 )
                 return self._fail_installment(
-                    installment, payment, "No payment token available", info
+                    installment,
+                    payment,
+                    str(_("No stored payment method is available for this plan.")),
+                    info,
                 )
 
             currency, amount = self.installment_charge(plan, installment)
@@ -1895,7 +1900,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     plan.order.code,
                 )
                 return self._fail_installment(
-                    installment, payment, "PostFinance transaction missing ID", info
+                    installment,
+                    payment,
+                    str(_("PostFinance did not return a transaction reference.")),
+                    info,
                 )
 
             info.update(
@@ -1950,7 +1958,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 return self._fail_installment(
                     installment,
                     payment,
-                    str(failure_reason or "PostFinance charge failed"),
+                    # PostFinance's own wording when it gives one; it is more
+                    # use to the customer than anything we could substitute.
+                    str(failure_reason or _("The payment was declined by PostFinance.")),
                     info,
                 )
 
@@ -1964,9 +1974,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return self._fail_installment(
                 installment,
                 payment,
-                f"PostFinance charge not successful: {charge_state.value}"
+                str(
+                    _("The payment did not complete (PostFinance state: {state}).")
+                ).format(state=charge_state.value)
                 if charge_state
-                else "PostFinance charge not successful",
+                else str(_("The payment did not complete.")),
                 info,
             )
 
