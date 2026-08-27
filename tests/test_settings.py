@@ -350,3 +350,147 @@ def test_transaction_creation_passes_the_charging_space(env, monkeypatch, transa
     provider._create_payment_transaction(payment)
 
     assert seen["allowed_payment_method_configurations"] == [1, 2]
+
+
+@pytest.mark.django_db
+def test_saved_methods_stay_selectable_when_the_api_is_unreachable(event, monkeypatch):
+    """
+    An unreachable API leaves the choice list empty, and a MultipleChoiceField
+    rejects a value that is not among its choices. Without carrying the saved
+    IDs through, an API blip would stop the organizer saving the settings page
+    at all — including the fields that have nothing to do with PostFinance.
+    """
+    event.settings.set("payment_postfinance_allowed_payment_methods", ["1", "2"])
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_method_configurations",
+        lambda self: (_ for _ in ()).throw(RuntimeError("PostFinance is down")),
+    )
+
+    provider = PostFinancePaymentProvider(event)
+    field = provider.settings_form_fields["allowed_payment_methods"]
+    values = [value for value, _label in field.choices]
+
+    assert values == ["1", "2"]
+    # The field is what validation runs against, so this is the real check.
+    field.clean(["1", "2"])
+
+
+@pytest.mark.django_db
+def test_saved_methods_are_not_duplicated_when_the_api_answers(event, monkeypatch):
+    event.settings.set("payment_postfinance_allowed_payment_methods", ["1", "9"])
+
+    config = MagicMock()
+    config.id = 1
+    config.name = "Card"
+    config.resolved_title = None
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_method_configurations",
+        lambda self: [config],
+    )
+
+    provider = PostFinancePaymentProvider(event)
+    field = provider.settings_form_fields["allowed_payment_methods"]
+    values = [value for value, _label in field.choices]
+
+    assert values == ["1", "9"]
+    assert dict(field.choices)["1"] == "Card"
+
+
+class FakeCache:
+    """
+    Stands in for `event.cache`. The test settings use a dummy cache backend
+    that stores nothing, so exercising the caching against a real backend
+    would mean fighting the harness; what matters here is how the provider
+    uses the cache API, which this records exactly.
+    """
+
+    def __init__(self):
+        self.store = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value, timeout=None):  # noqa: ARG002
+        self.store[key] = value
+
+    def delete(self, key):
+        self.store.pop(key, None)
+
+
+@pytest.fixture
+def fake_cache(event):
+    cache = FakeCache()
+    # `Event.cache` is a cached_property, so seeding __dict__ replaces it.
+    event.__dict__["cache"] = cache
+    return cache
+
+
+@pytest.mark.django_db
+def test_payment_method_choices_are_cached_per_space(event, fake_cache, monkeypatch):
+    """
+    The payment provider list page evaluates settings_form_fields for every
+    provider, so an uncached fetch makes an unrelated page wait on the API.
+    """
+    calls = []
+
+    def fake_configs(self):
+        calls.append(self.space_id)
+        return []
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_method_configurations",
+        fake_configs,
+    )
+
+    provider = PostFinancePaymentProvider(event)
+    provider._get_payment_method_choices()
+    provider._get_payment_method_choices()
+
+    assert len(calls) == 1
+    assert "postfinance_payment_methods_12345" in fake_cache.store
+
+
+@pytest.mark.django_db
+def test_a_failed_fetch_is_not_cached(event, fake_cache, monkeypatch):
+    """A blip must not lock the empty list in for the whole timeout."""
+    calls = []
+
+    def fake_configs(self):
+        calls.append(self.space_id)
+        raise RuntimeError("PostFinance is down")
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_method_configurations",
+        fake_configs,
+    )
+
+    provider = PostFinancePaymentProvider(event)
+
+    assert provider._get_payment_method_choices() == []
+    assert provider._get_payment_method_choices() == []
+    assert len(calls) == 2
+    assert fake_cache.store == {}
+
+
+@pytest.mark.django_db
+def test_saving_the_settings_drops_the_cached_list(event, fake_cache, monkeypatch):
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_method_configurations",
+        lambda self: [],
+    )
+
+    provider = PostFinancePaymentProvider(event)
+    provider._get_payment_method_choices()
+    assert fake_cache.get("postfinance_payment_methods_12345") is not None
+
+    provider.settings_form_clean(
+        {
+            "_enabled": True,
+            "space_id": "12345",
+            "user_id": "67890",
+            "auth_key": "secret",
+        }
+    )
+    assert fake_cache.get("postfinance_payment_methods_12345") is None

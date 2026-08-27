@@ -652,3 +652,7 @@ msgstr ""
 #: views.py:630 views.py:652
 msgid "PostFinance payment provider not found."
 msgstr "No se ha encontrado el proveedor de pago de PostFinance."
+
+#: payment.py:364
+msgid "Configuration {id} (name unavailable)"
+msgstr "Configuración {id} (nombre no disponible)"

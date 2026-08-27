@@ -114,6 +114,12 @@ PROD_SPACE_IN_TESTMODE_KEY = "prod_space_in_testmode"
 # collected in one space means nothing in the other.
 ALLOWED_METHODS_SPACE_KEY = "allowed_payment_methods_space"
 
+# How long the payment method list fetched from PostFinance stays good for.
+# Short enough that a newly configured method shows up without anyone having
+# to know about the cache, long enough that repeated settings page renders
+# do not each wait on the API.
+METHOD_CHOICES_CACHE_TIMEOUT = 300
+
 # All provider identifiers used by this plugin. Payments and refunds may be
 # stored under any of these.
 PROVIDER_IDENTIFIERS = (MAIN_PROVIDER_IDENTIFIER, PROD_PROVIDER_IDENTIFIER)
@@ -295,6 +301,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         if not all([space_id, user_id, auth_key]):
             return []
 
+        # Every render of the payment settings — including the list of all
+        # payment providers, which evaluates `settings_form_fields` for each
+        # one — would otherwise wait on a live API call, up to the client's
+        # full timeout.
+        cache_key = f"postfinance_payment_methods_{space_id}"
+        cached = self.event.cache.get(cache_key)
+        if cached is not None:
+            return [(str(value), str(label)) for value, label in cached]
+
         try:
             client = self._get_client_for_mode("live")
             configs = client.get_payment_method_configurations()
@@ -312,13 +327,47 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         if title:
                             name = title
                     choices.append((str(config.id), name))
-            return sorted(choices, key=lambda x: x[1])
+            choices = sorted(choices, key=lambda x: x[1])
         except Exception:
             # Settings form rendering must never break on bad credentials.
             # The SDK raises non-PostFinanceError exceptions for malformed
             # auth keys (e.g. binascii.Error) before any HTTP call.
+            # Deliberately not cached: the next render should try again.
             logger.warning("Failed to fetch payment method configurations", exc_info=True)
             return []
+
+        # Outside the guard above, so a cache backend problem cannot be
+        # mistaken for the space having no payment methods.
+        self.event.cache.set(cache_key, choices, timeout=METHOD_CHOICES_CACHE_TIMEOUT)
+        return choices
+
+    def _method_choices_with_saved(
+        self, choices: list[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        """
+        Add any saved-but-unlisted method IDs to the choice list.
+
+        A `MultipleChoiceField` rejects a value that is not among its choices,
+        so when the API is unreachable — or a configuration is retired at
+        PostFinance — the saved IDs would fail validation and the organizer
+        could not save the settings page at all, including the fields that
+        have nothing to do with payment methods. Carrying the saved values
+        through keeps the form saveable and shows what is currently selected.
+        """
+        known = {value for value, _label in choices}
+        saved = self.settings.get("allowed_payment_methods", as_type=list) or []
+        extra = sorted(
+            {str(value) for value in saved if value and str(value) not in known}
+        )
+        if not extra:
+            return choices
+        return choices + [
+            (
+                value,
+                str(_("Configuration {id} (name unavailable)")).format(id=value),
+            )
+            for value in extra
+        ]
 
     def _parse_allowed_payment_methods(self, space_id: int | None = None) -> list[int] | None:
         """
@@ -492,7 +541,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                             "Leave empty to allow all payment methods. "
                             "Save your credentials first to see available options."
                         ),
-                        choices=payment_method_choices,
+                        choices=self._method_choices_with_saved(payment_method_choices),
                         widget=forms.CheckboxSelectMultiple,
                         required=False,
                     ),
@@ -558,6 +607,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "this payment provider: {fields}"
                 ).format(fields=", ".join(missing))
                 raise ValidationError(msg)
+
+        # Saving may well be how an organizer fixes wrong credentials or adds
+        # a method at PostFinance, so the cached list must not outlive it.
+        # `event.cache` is documented to clear itself when related objects
+        # change; not depending on that covering hierarkey's settings rows.
+        if cleaned_data.get("space_id"):
+            self.event.cache.delete(
+                f"postfinance_payment_methods_{cleaned_data['space_id']}"
+            )
 
         # The choice list is read from the production space, so that is the
         # space the saved IDs belong to. Set it here rather than trusting what
