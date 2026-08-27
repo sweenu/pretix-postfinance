@@ -1692,3 +1692,52 @@ def test_control_templates_carry_no_inline_styles():
         path.name for path in templates.glob("*.html") if 'style="' in path.read_text()
     ]
     assert not offenders
+
+
+@pytest.mark.django_db
+def test_execute_payment_failure_keeps_transaction_reference(
+    env, rf, monkeypatch, transaction_factory
+):
+    """
+    `OrderPayment.fail()` assigns what it is given to info_data instead of
+    merging it, so failing a payment must pass the existing data back in.
+    Losing it would take the dashboard link, `matching_id()` and the FX
+    snapshot with it, and leave no transaction_id for a later webhook to
+    match on.
+    """
+    event, order = env
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: transaction_factory(id=tid, state=TransactionState.FAILED),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.get("/")
+    req.session = {}
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps(
+            {
+                "pending_transaction_id": 424242,
+                "space_id": 12345,
+                "fx_rate": "1.08",
+                "fx_base_currency": "EUR",
+                "charged_currency": "CHF",
+                "charged_amount": "14.44",
+            }
+        ),
+    )
+
+    prov.execute_payment(req, payment)
+
+    payment.refresh_from_db()
+    assert payment.state == OrderPayment.PAYMENT_STATE_FAILED
+    assert payment.info_data["state"] == "FAILED"
+    assert payment.info_data["transaction_id"] == 424242
+    assert payment.info_data["space_id"] == 12345
+    assert payment.info_data["charged_currency"] == "CHF"
+    assert payment.info_data["charged_amount"] == "14.44"
+    assert prov.matching_id(payment) == 424242

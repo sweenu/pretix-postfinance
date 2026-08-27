@@ -32,6 +32,7 @@ from .api import (
 )
 from .payment import (
     FAILURE_STATES,
+    PENDING_TRANSACTION_ID_KEY,
     PROD_PROVIDER_IDENTIFIER,
     PROVIDER_IDENTIFIERS,
     SPACE_ID_KEY,
@@ -312,9 +313,19 @@ def _derived_space_id(obj: Any) -> str | None:
     return live_space_id
 
 
-def _find_entity(queryset: QuerySet, id_key: str, entity_id: int, space_id: int) -> Any | None:
+def _find_entity(
+    queryset: QuerySet, id_keys: tuple[str, ...], entity_id: int, space_id: int
+) -> Any | None:
     """
     Find the payment or refund an incoming webhook is about.
+
+    ``id_keys`` are the ``info_data`` keys that can hold the entity's ID. A
+    transaction has two: it is recorded under ``pending_transaction_id`` from
+    the moment the customer is sent to the payment page, and only promoted to
+    ``transaction_id`` when they come back. A webhook that arrives before that
+    — the customer closed the tab, or PostFinance simply got there first —
+    must still find its payment, or the payment is never confirmed and an
+    installment plan never gets its token.
 
     PostFinance entity IDs are only unique within a space, so the same ID can
     identify a different transaction in the production and in the test space.
@@ -326,7 +337,7 @@ def _find_entity(queryset: QuerySet, id_key: str, entity_id: int, space_id: int)
 
     for obj in queryset.filter(info__icontains=str(entity_id)):
         info_data = obj.info_data or {}
-        if str(info_data.get(id_key)) != str(entity_id):
+        if not any(str(info_data.get(key)) == str(entity_id) for key in id_keys):
             continue
 
         expected_space_id = _recorded_space_id(obj) or _derived_space_id(obj)
@@ -338,7 +349,7 @@ def _find_entity(queryset: QuerySet, id_key: str, entity_id: int, space_id: int)
         logger.warning(
             "PostFinance webhook: ignoring %s %s from space %s, "
             "%s local entity/entities with that ID belong to another space",
-            id_key,
+            "/".join(id_keys),
             entity_id,
             space_id,
             other_space_matches,
@@ -422,7 +433,7 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
     """
     payment = _find_entity(
         OrderPayment.objects.filter(provider__in=PROVIDER_IDENTIFIERS),
-        "transaction_id",
+        ("transaction_id", PENDING_TRANSACTION_ID_KEY),
         entity_id,
         space_id,
     )
@@ -456,6 +467,9 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
         payment_method = transaction.payment_connector_configuration.name
 
     info_data = payment.info_data or {}
+    # The transaction is now known by its final key, so the provisional one
+    # recorded when the customer was sent to the payment page is redundant.
+    info_data.pop(PENDING_TRANSACTION_ID_KEY, None)
     info_data.update(
         {
             "transaction_id": entity_id,
@@ -502,7 +516,15 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
 
     if transaction_state in FAILURE_STATES:
         try:
-            payment.fail(info={"state": transaction_state.value if transaction_state else None})
+            # `fail()` assigns whatever it is given to info_data rather than
+            # merging it, so the transaction reference, the space and the FX
+            # snapshot only survive if they are passed back in.
+            payment.fail(
+                info={
+                    **info_data,
+                    "state": transaction_state.value if transaction_state else None,
+                }
+            )
             logger.info("PostFinance webhook: payment %s failed", payment.pk)
             return (WEBHOOK_STATUS_OK, True)
         except Exception as e:
@@ -536,7 +558,7 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
     """
     refund = _find_entity(
         OrderRefund.objects.filter(provider__in=PROVIDER_IDENTIFIERS),
-        "refund_id",
+        ("refund_id",),
         entity_id,
         space_id,
     )

@@ -953,3 +953,233 @@ class TestWebhookSpaces:
         with scopes_disabled():
             refund.refresh_from_db()
             assert refund.state == OrderRefund.REFUND_STATE_DONE
+
+
+class TestWebhookPendingTransaction:
+    """
+    A transaction is recorded under ``pending_transaction_id`` from the moment
+    the customer is sent to the payment page, and only promoted to
+    ``transaction_id`` when they come back. A webhook that arrives before that
+    has to find the payment anyway — otherwise a customer who closes the tab
+    after paying leaves the order unpaid forever, and an installment plan
+    never gets the token its later charges depend on.
+    """
+
+    @pytest.mark.django_db
+    def test_pending_transaction_id_is_matched(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        event, order = webhook_env
+
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.FULFILL
+        mock_transaction.payment_connector_configuration = None
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"pending_transaction_id": 778899, "space_id": 12345}),
+                state=OrderPayment.PAYMENT_STATE_CREATED,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(778899, state="FULFILL")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        order.refresh_from_db()
+
+        assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+        assert order.status == Order.STATUS_PAID
+
+    @pytest.mark.django_db
+    def test_pending_key_is_promoted_not_duplicated(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """The provisional key is dropped once the final one is written."""
+        event, order = webhook_env
+
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.AUTHORIZED
+        mock_transaction.payment_connector_configuration = None
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"pending_transaction_id": 778899, "space_id": 12345}),
+                state=OrderPayment.PAYMENT_STATE_CREATED,
+            )
+
+        client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(778899, state="AUTHORIZED")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+
+        assert payment.info_data["transaction_id"] == 778899
+        assert "pending_transaction_id" not in payment.info_data
+
+    @pytest.mark.django_db
+    def test_pending_transaction_from_another_space_is_ignored(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """The space still has to match — IDs are only unique within one."""
+        event, order = webhook_env
+
+        called = []
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: called.append(tid),
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"pending_transaction_id": 778899, "space_id": 99999}),
+                state=OrderPayment.PAYMENT_STATE_CREATED,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(778899, space_id=12345, state="FULFILL")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+        assert called == []
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        assert payment.state == OrderPayment.PAYMENT_STATE_CREATED
+
+
+class TestWebhookFailurePreservesInfo:
+    """
+    ``OrderPayment.fail()`` assigns whatever it is given to ``info_data``
+    instead of merging it. Failing a payment must therefore pass the existing
+    data back in, or the transaction reference, the space and the FX snapshot
+    are destroyed — which breaks the dashboard link, ``matching_id()`` and any
+    later webhook for the same transaction.
+    """
+
+    @pytest.mark.django_db
+    def test_failed_webhook_keeps_transaction_reference(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        event, order = webhook_env
+
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.FAILED
+        mock_transaction.payment_connector_configuration = None
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps(
+                    {
+                        "transaction_id": 123456,
+                        "space_id": 12345,
+                        "state": "PROCESSING",
+                        "fx_rate": "1.08",
+                        "fx_base_currency": "EUR",
+                        "charged_currency": "CHF",
+                        "charged_amount": "14.44",
+                    }
+                ),
+                state=OrderPayment.PAYMENT_STATE_PENDING,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456, state="FAILED")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+
+        assert payment.state == OrderPayment.PAYMENT_STATE_FAILED
+        assert payment.info_data["state"] == "FAILED"
+        assert payment.info_data["transaction_id"] == 123456
+        assert payment.info_data["space_id"] == 12345
+        assert payment.info_data["charged_currency"] == "CHF"
+        assert payment.info_data["charged_amount"] == "14.44"
+        assert payment.info_data["fx_rate"] == "1.08"
+
+    @pytest.mark.django_db
+    def test_failed_payment_is_still_findable_by_a_later_webhook(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """Keeping transaction_id is what lets _find_entity match again."""
+        event, order = webhook_env
+
+        state = {"value": TransactionState.FAILED}
+        mock_transaction = MagicMock()
+        mock_transaction.payment_connector_configuration = None
+
+        def get_transaction(self, tid):
+            mock_transaction.state = state["value"]
+            return mock_transaction
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction", get_transaction
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"pending_transaction_id": 123456, "space_id": 12345}),
+                state=OrderPayment.PAYMENT_STATE_CREATED,
+            )
+
+        client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456, state="FAILED")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        state["value"] = TransactionState.VOIDED
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456, state="VOIDED")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        assert payment.info_data["transaction_id"] == 123456
